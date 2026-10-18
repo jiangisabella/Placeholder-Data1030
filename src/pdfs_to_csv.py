@@ -55,7 +55,7 @@ FIRST_FISCAL_YEAR = 2009         # the pages before this are calendar years
 PDF_DIR = Path("data/raw_pdfs")
 CSV_DIR = Path("data/raw_csvs")
 UNPARSED_DIR = Path("data/unparsed_lines")   # one .txt per PDF with problems
-REDO_EXISTING_CSVS = True
+REDO_EXISTING_CSVS = False
 
 SECONDS_BETWEEN_REQUESTS = 1.0   # be polite to the NLRB server
 HEADERS = {"User-Agent": "DATA1030 student project (union election research)"}
@@ -596,90 +596,197 @@ if __name__ == "__main__":
     convert_all_pdfs()    # PDFs that already have a CSV are skipped
 
 
+# ============================================================================
+# NOTES FOR LATER: PREPROCESSING STEPS (for using the 2011-2026 CSVs)
+# ============================================================================
+#   [all]   every row
+#   [table] rows with extraction_method == "table" (PDF's own column names)
+#   [text]  rows with extraction_method == "text"  (our column names)
+#
 # ----------------------------------------------------------------------------
-# NOTES FOR LATER (data cleaning, to do in pandas)
+# NO LONGER NEEDED if we only use April 2011 onwards
 # ----------------------------------------------------------------------------
-# General
-# 1. Read every CSV with dtype=str, then convert types yourself (vote counts
-#    -> numbers, dates -> dates). Keep case numbers as text. Region = first
-#    two characters of the case number ("01", not 1).
+# The old "grouped" layout (FY2009 to March 2011) is the only one with:
+#   - one-letter election type codes (S/C/R/B/E), so no code mapping is needed
+#   - industry_code and unit_type (note: you lose these two features)
+#   - employer name and city merged together in case_name
+#   - "WON / LOST" spelling, the "LOS T" typo, and the " | "-joined union
+#     lines for multi-union elections
 #
-# 2. Two kinds of CSVs: "table" method rows use the PDF's own column names
-#    ("Case Number", "Closed Date", ...), "text" method rows use ours
-#    ("case_number", "closed_date", ...). Column names in the PDFs also
-#    changed a little over the years. Check df.columns after loading and
-#    rename to one set of names, e.g.
-#        "Case Number" / case_number           -> case_number
-#        "Dispute Unit City" / "City" / city   -> city
-#        "Num Eligible Voters" / eligible      -> eligible
-#        "Valid Votes Against" / votes_against -> votes_against
-#        "Votes for Labor Org 1" / votes_for   -> votes_for
+# BUT: the FY2011 folder covers Oct 2010 - Sep 2011, so its Oct 2010 - Mar
+# 2011 files still use the old layout. Drop those rows in Step 1.
 #
-# 3. Case type: take it from the case number, which is always there:
-#    "01-RD-386098"[3:5] -> "RD".
+# ----------------------------------------------------------------------------
+# STEP 1  Load and keep the right rows                                  [all]
+# ----------------------------------------------------------------------------
+#   files = sorted(Path("data/raw_csvs").glob("FY20*/*.csv"))
+#   df = pd.concat([pd.read_csv(f, dtype=str) for f in files], ignore_index=True)
+#   df = df[~df["layout"].fillna("").str.startswith("grouped")]   # pre-Apr 2011
 #
-# 4. UD cases (case type "UD") are a different kind of vote (on removing a
-#    union-security clause, using "For/Against Proposition" columns). They
-#    are not union elections, so drop them.
+# Read everything as text (dtype=str) so case numbers like "01-RC-..." and
+# region "01" keep their leading zeros. Convert types in Step 4.
 #
-# Result columns
-# 5. Table method: the result is in two columns, "Cert of Rep (Win)" = WON
-#    and "Cert of Results (Loss)" = LOSS. A few rows have both filled in
-#    (e.g. 25-RC-382281 in April 2026: 15 for vs 6 against, but closed with
-#    a Certification of Results). Use "Closed Reason" to decide, and check
-#    those rows on their case pages.
-#    Text method: "result" says WON / LOSS (or WON / LOST in the oldest
-#    "grouped" layout). Pick one spelling.
+# ----------------------------------------------------------------------------
+# STEP 2  Make one set of column names                            [table/text]
+# ----------------------------------------------------------------------------
+# Column names differ between the two methods AND between years (the NLRB
+# changed the report format). First list what you actually have:
+#   for f in files:
+#       print(f.parent.name, f.name, list(pd.read_csv(f, nrows=0).columns))
+# Then rename to one set of names, for example:
+#   case_number    <- "Case Number", case_number
+#   case_name      <- "Case Name", case_name
+#   city           <- "Dispute Unit City", "City", city
+#   state          <- "Dispute Unit State", "State", state
+#   file_date      <- "Case File Date", file_date        (2011-2014 only)
+#   election_date  <- "Election Held Date", election_date
+#   eligible       <- "Num Eligible Voters", "Number of Eligible Voters", eligible
+#   votes_against  <- "Valid Votes Against", votes_against
+#   votes_for      <- "Votes for Labor Org 1", votes_for
+#   union_name     <- "Labor Org 1 Name", union_name
+#   method         <- "Stipulated / Consent / Directed",
+#                     "Stiplulated / Consent / Directed" (typo in 2012 reports),
+#                     election_method
+#   closed_date    <- "Closed Date", "Case Closed Date", closed_date
+#   closed_reason  <- "Closed Reason", closed_reason
+# After renaming, use df.columns to check that nothing is left over.
 #
-# 6. Sanity check: the union normally wins if votes for > votes against (a
-#    tie is a loss). Compare with the result; challenged ballots and later
-#    events can change outcomes, so trust the reported result.
+# ----------------------------------------------------------------------------
+# STEP 3  Keep only union representation elections                     [all]
+# ----------------------------------------------------------------------------
+# - Take the case type from the case number, which is always there:
+#       df["case_type"] = df["case_number"].str[3:5]
+# - Keep RC, RD and RM. Drop UD: those are votes on removing a union-security
+#   clause (they use "For/Against Proposition" columns), not union elections.
+# - Region (NLRB office) = df["case_number"].str[:2]. Ignore the report's own
+#   "Region" column (e.g. "05, 05 WDC"); it lists several office codes.
 #
-# 7. "Closed Reason" is written two ways: "Certific. of Representative"
-#    (union won) and "Certification of Results" (union lost). Standardize.
+# ----------------------------------------------------------------------------
+# STEP 4  Convert types                                                [all]
+# ----------------------------------------------------------------------------
+# - eligible, votes_for, votes_against (and Votes for Labor Org 2/3):
+#       pd.to_numeric(col.str.replace(",", ""), errors="coerce")
+# - dates: pd.to_datetime(col, format="mixed", errors="coerce")
+#   (some years use 04/01/2026, others 4/1/2026)
+# - After converting, count the blanks per column (df.isna().sum()).
+#   Known blanks: some rows have no election date (e.g. 12-RD-382359 in
+#   April 2026), and a few text-method rows have no vote counts (Step 9).
 #
-# Text method only
-# 8. Election method: the "grouped" layout uses a one-letter code in
-#    election_type_code. Map it to the newer words:
-#        OLD_ELECTION_TYPES = {
-#            "S": "Stipulated",   # both sides agreed on the election terms
-#            "C": "Consent",      # both sides agreed, regional director has final say
-#            "R": "Directed",     # ordered by the Regional Director
-#            "B": "Directed",     # ordered by the Board
-#            "E": "Expedited",
-#        }
-#    Some old rows use lowercase letters (e.g. "r"), so uppercase first.
+# ----------------------------------------------------------------------------
+# STEP 5  Remove duplicates                                            [all]
+# ----------------------------------------------------------------------------
+# - The same month can appear twice: year pages sometimes list a month that
+#   belongs to the next fiscal year (the FY2012 page links October 2012),
+#   and some months were re-uploaded. Drop repeats on
+#       ["case_number", "eligible", "votes_for", "votes_against"]
+#   (a case with two voting units has the same case number but different
+#   votes, so it is kept).
+# - One vote can be filed as two cases, e.g. Georgia Power 10-RC-389059 and
+#   10-RM-389062 (same date, same votes). Find repeats on
+#       ["case_name", "election_date", "eligible", "votes_for", "votes_against"]
+#   and keep one.
 #
-# 9. "grouped" case_name holds "Employer City" together, and a leading "*"
-#    marks an incumbent union. Strip the "*"; splitting off the city is hard.
+# ----------------------------------------------------------------------------
+# STEP 6  Build the target                                       [table/text]
+# ----------------------------------------------------------------------------
+# union_won = 1 if the union is certified (wins / keeps representation).
+# For RD (decertification) cases this means the union SURVIVED the vote.
+# - [table, ~2014+] Two columns: "Cert of Rep (Win)" = WON and
+#   "Cert of Results (Loss)" = LOSS. A few rows have BOTH filled in (e.g.
+#   25-RC-382281 and 14-RM-381656 in April 2026), so use closed_reason:
+#       "Certific. of Representative" -> 1
+#       "Certification of Results"    -> 0
+#   (closed_reason is spelled two ways, so match on "Representative"/"Results")
+# - [2011-2014 reports] a single "Union (Win / Loss)" column: WON / LOSS.
+# - [text] the result column: WON / LOSS.
+# - Sanity check: normally union_won == (votes_for > votes_against) (a tie
+#   is a loss). List the rows that disagree and look a few up on their case
+#   pages; when they disagree, trust the official result.
+# - For a regression target instead:
+#       vote_share = votes_for / (votes_for + votes_against)
+#   Drop rows where votes_for + votes_against == 0.
 #
-# 10. Long names that wrap in the PDF can be cut off or mixed with pieces of
-#     other columns (the table method doesn't have this problem). raw_line
-#     shows the text that was read. after_result holds the closed date and
-#     closed reason for the "standard" layout.
+# ----------------------------------------------------------------------------
+# STEP 7  Decide on multi-union elections                        [table/text]
+# ----------------------------------------------------------------------------
+# - [table] rows with "Votes for Labor Org 2" (or Org 3) filled in had 2-3
+#   unions on the ballot. "Union To Certify" names the winner (blank = no
+#   union won).
+# - [text] rows whose section says "2 Labor" / "3 Labor" have the second
+#   union's votes mixed into union_name, so they can't be cleaned well.
+# - Simplest: drop multi-union rows (they are a small share) and say so in
+#   the report. Or keep them with a num_unions feature and
+#   union_won = Union To Certify is not blank.
 #
-# 11. parse_note = "state found in wrapped text, please check": the state was
-#     picked out of leftover text and can be fooled by words like "IN" or
-#     "OR". parse_note = "fewer than 3 vote numbers in PDF": vote columns are
-#     blank and vote_numbers holds what was there; look these up or drop.
+# ----------------------------------------------------------------------------
+# STEP 8  Clean features                                               [all]
+# ----------------------------------------------------------------------------
+# - state -> Census region (Northeast / Midwest / South / West). Put PR, GU,
+#   VI in their own "Territory" group or drop them.
+# - eligible: use log(eligible) (ranges from 1 to several thousand). Check
+#   for bad values: eligible == 0, or votes_for + votes_against > eligible.
+# - method: Stipulated / Consent / Directed (check for blanks).
+# - union_name -> parent union with keyword rules (case-insensitive), e.g.
+#   "teamster" -> Teamsters, "seiu" or "service employees" -> SEIU,
+#   "workers united" -> Workers United (SEIU), "food and commercial" or
+#   "ufcw" -> UFCW, "electrical workers" or "ibew" -> IBEW, else "Other".
+#   Names are often cut off or written differently, so check the top ~50.
+# - case_name -> normalized employer name for grouping (lowercase, remove
+#   punctuation, drop "inc", "llc", "corp", and anything after "d/b/a").
+#   e.g. "Starbucks Corporation" -> "starbucks". Needed for the group split
+#   in Step 11, and for a "repeat employer" feature.
+# - election month / year from election_date.
+# - days from filing to election = election_date - file_date. NOTE: the
+#   filing date is only in the 2011-2014 reports. For other years it has to
+#   come from the case pages (Date Filed), or leave this feature out.
+# - Long delays: some elections closed years after the vote (e.g. 2022
+#   elections closed in 2026, usually after legal challenges). Flag them
+#   (closed_date - election_date) and decide whether to keep them.
 #
-# Both methods
-# 12. Multi-union elections: table method rows have "Votes for Labor Org 2"
-#     / "Labor Org 2 Name" filled in (and "Union To Certify"). In the newer
-#     text layouts, the second union's votes are mixed into union_name.
-#     In the "grouped (multi-union)" layout, result and votes_for are blank
-#     and union_name holds every union line as printed, separated by " | ":
-#         "Teamsters (IBT) WON I 26 | American Nurses' Association (ANA) LOST P 24"
-#     i.e. name, WON/LOST, role (P = petitioner, I = intervenor, U = union
-#     involved) and that union's votes. A leading "*" marks the incumbent,
-#     and one PDF prints "LOS T" for LOST. Decide whether to keep them.
+# ----------------------------------------------------------------------------
+# STEP 9  Text-method extra cleanup                                   [text]
+# ----------------------------------------------------------------------------
+# Only needed if some 2011-2026 PDFs used the text method (the converter
+# prints "(text method)" for those files).
+# - Long names that wrap in the PDF can be cut off (e.g. "The Trustees of
+#   the"). raw_line shows what was read; the case page has the full name.
+# - parse_note = "state found in wrapped text, please check": the state was
+#   picked from leftover text and can be fooled by words like "IN" or "OR".
+#   Check it against the city.
+# - parse_note = "fewer than 3 vote numbers in PDF": vote columns are blank;
+#   look them up on the case page or drop the row.
+# - after_result holds the closed date and closed reason, e.g.
+#   "08/27/2026 Certification of". Pull them out with a regex:
+#       r"(\d{1,2}/\d{1,2}/\d{4})\s+(.*)"
+#   then use closed_reason for the target (Step 6).
+# - case_id (e.g. 1-Y1LQL4, ~2015-2018) is an internal ID, not a feature.
 #
-# 13. Duplicates: some months were uploaded twice (corrected re-uploads).
-#     Drop repeats on case number + vote counts.
+# ----------------------------------------------------------------------------
+# STEP 10  Drop leakage and helper columns before modeling             [all]
+# ----------------------------------------------------------------------------
+# These are known only AFTER the election, or are just bookkeeping:
+#   votes_for, votes_against, Votes for Labor Org 2/3 (they define the
+#   target), closed_date, closed_reason, "Cert of Rep (Win)",
+#   "Cert of Results (Loss)", "Union (Win / Loss)", "Union To Certify",
+#   "Cert Rep Win Count", "% Won by Union", after_result, raw_line,
+#   source_pdf, page, extraction_method, layout, parse_note, case_id.
+# Keep case_number and the normalized employer name for splitting, but
+# don't use them as features.
 #
-# 14. Leakage: "Closed Date" and "Closed Reason" are known only after the
-#     election, so don't use them as model features. (Closed Reason is
-#     useful for the target.)
+# ----------------------------------------------------------------------------
+# STEP 11  Splitting (the data is not iid)                             [all]
+# ----------------------------------------------------------------------------
+# - Time: sort by election_date (NOT closed date). Train on earlier years,
+#   validate on the next, test on the most recent (e.g. FY2025-2026).
+# - Groups: the same employer appears many times (e.g. Starbucks). Use
+#   GroupKFold / GroupShuffleSplit on the normalized employer name inside
+#   the training years.
+# - Any "history" feature (e.g. a union's past win rate) must use only
+#   elections before that row's election date.
 #
-# 15. Check data/unparsed_lines/ and any CSV with 0 rows, and note which
-#     PDFs used the "text" method (printed while converting).
+# ----------------------------------------------------------------------------
+# STEP 12  Save                                                        [all]
+# ----------------------------------------------------------------------------
+# Save the result to data/elections_clean.csv, and write the data
+# documentation (each column, its type and units / categories) for the
+# report appendix or a data/README.md.
