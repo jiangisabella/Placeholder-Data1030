@@ -6,16 +6,15 @@ PDF. Cleaning is a separate step (see the TODO list at the bottom).
     pip install -r requirements.txt
     python src/pdfs_to_csv.py
 
-A few reports (most of 2023, April 2019) have no real text in them, so those
-get OCR'd. 
-
 PDFs are saved to data/raw_pdfs/<FY>/ and CSVs to data/raw_csvs/<FY>/.
 Anything already on disk is skipped, so it's fine to stop it and rerun.
+
+A few reports (most of 2023, April 2019) have no readable text in them, just
+pictures of a table, so they're skipped. They get listed in
+data/skipped_pdfs.txt.
 """
 
 import csv
-import difflib
-import itertools
 import re
 import time
 from pathlib import Path
@@ -24,7 +23,6 @@ from urllib.parse import urljoin
 import pdfplumber
 import requests
 from bs4 import BeautifulSoup
-from PIL import ImageOps
 
 INDEX_URL = "https://www.nlrb.gov/reports/agency-performance/election-reports"
 FIRST_FY = 2012   # FY2012 = Oct 2011 to Sep 2012
@@ -32,18 +30,12 @@ FIRST_FY = 2012   # FY2012 = Oct 2011 to Sep 2012
 PDF_DIR = Path("data/raw_pdfs")
 CSV_DIR = Path("data/raw_csvs")
 UNPARSED_DIR = Path("data/unparsed_lines")
+SKIPPED_TXT = Path("data/skipped_pdfs.txt")
 
 REDO_CSVS = False   # True = rebuild CSVs that already exist
 
-WAIT = 1   # seconds between requests 
+WAIT = 1   # seconds between requests
 REQUEST_HEADERS = {"User-Agent": "DATA1030 class project"}
-
-# only needed if tesseract isn't on your PATH. falls back to the default
-# Windows install location if that exists
-TESSERACT = None
-if Path(r"C:\Program Files\Tesseract-OCR\tesseract.exe").exists():
-    TESSERACT = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-OCR_DPI = 450   # 300 misreads some digits (55 -> 35), 450 got them right
 
 
 """Using beatiful soup to download PDFS"""
@@ -130,244 +122,8 @@ def clean_cell(cell):
     return " ".join(cell.split()) if cell else ""
 
 
-def cell_grid(page):
-    # For OCR: every table cell is drawn as its own filled box
-    # (white or grey), so the boxes tell us where the rows and columns are.
-    # pdfplumber's own table finder lumps several rows together on these
-    # (some pages also have one big frame box around everything, skip that)
-    boxes = [r for r in page.rects
-             if r["width"] > 3 and r["height"] > 3 and r["width"] < page.width * 0.6]
-    boxes.sort(key=lambda r: (r["top"], r["x0"]))
-
+def read_tables(pdf, source):
     rows = []
-    for b in boxes:
-        # same row if it starts at (about) the same height
-        if rows and abs(b["top"] - rows[-1][0]["top"]) < 2:
-            # skip a box drawn twice in the same spot
-            if all(abs(b["x0"] - other["x0"]) > 1 for other in rows[-1]):
-                rows[-1].append(b)
-        else:
-            rows.append([b])
-
-    return [[(b["x0"], b["top"], b["x1"], b["bottom"])
-             for b in sorted(row, key=lambda r: r["x0"])] for row in rows]
-
-
-#OCR adjustments
-def fix_case_no(text):
-    '''    
-    OCR mixes up O and 0 (and a few others) in case numbers and sometimes
-    adds spaces, e.g. "O5-RC-316129", "07-RCO-318048", "12-RC-31 1053"
-    '''
-    m = re.search(r"([0-9OoIlS]{2})-([A-Z0-9]{2,3})-([0-9OoIlS]{5,6})", text.replace(" ", ""))
-    if not m:
-        return text
-    digits = str.maketrans("OoIlS", "00115")
-    kind = m.group(2)[:2].replace("0", "O")
-    return f"{m.group(1).translate(digits)}-{kind}-{m.group(3).translate(digits)}"
-
-
-# column names from the reports that do have text, by number of columns
-# (1 union, 2 unions, 3 unions, UD votes). OCR'd headers come out garbled
-# now and then, so for those we go by how many columns the table has
-_start = ["Region", "Case Number", "Case ID", "Case Name", "Case Type",
-          "Dispute Unit City", "Dispute Unit State", "Election Held Date",
-          "Num Eligible Voters"]
-_end = ["Stipulated / Consent / Directed", "Cert of Rep (Win)", "Cert of Results (Loss)"]
-HEADERS = {
-    17: _start + ["Valid Votes Against", "Votes for Labor Org 1", "Labor Org 1 Name"]
-         + _end + ["Closed Date", "Closed Reason"],
-    20: _start + ["Valid Votes Against", "Votes for Labor Org 1", "Labor Org 1 Name",
-                  "Votes for Labor Org 2", "Labor Org 2 Name"]
-         + _end + ["Union To Certify", "Closed Date", "Closed Reason"],
-    22: _start + ["Valid Votes Against", "Votes for Labor Org 1", "Labor Org 1 Name",
-                  "Votes for Labor Org 2", "Labor Org 2 Name", "Votes For Labor Org3", "Labor Org3"]
-         + _end + ["Union To Certify", "Closed Date", "Closed Reason"],
-    15: _start + ["For Proposition", "Against Proposition", "Labor Org 1 Name",
-                  "Stipulated / Consent / Directed", "Closed Date", "Closed Reason"],
-}
-ALL_HEADERS = sorted({h for names in HEADERS.values() for h in names})
-
-
-def words_in(words, box):
-    # the OCR'd words whose middle falls inside box, read line by line
-    x0, top, x1, bottom = box
-    inside = sorted((w for w in words if x0 <= w[0] <= x1 and top <= w[1] <= bottom),
-                    key=lambda w: w[1])
-    lines = []
-    for w in inside:
-        if lines and w[1] - lines[-1][0][1] < 3:
-            lines[-1].append(w)
-        else:
-            lines.append([w])
-    text = " ".join(t for line in lines for _, _, t in sorted(line))
-    # table borders sometimes get read as | or —
-    return " ".join(text.replace("|", " ").replace("—", " ").split())
-
-
-def ocr_cell(img, box, digits=False, scale=None, bw=False):
-    # read one cell on its own. on a full page tesseract skips short or lone
-    # bits like "RC", "CA", "LOSS" or a single digit, and reads some digits
-    # wrong. one cell at a time (and digits only, for numbers) is a lot better
-    import pytesseract
-    k = OCR_DPI / 72
-    x0, top, x1, bottom = box
-    pad = int(k)   # stay about 1pt inside the cell so the border isn't read as a 1
-    crop = img.crop((int(x0 * k) + pad, int(top * k) + pad, int(x1 * k) - pad, int(bottom * k) - pad))
-    crop = crop.convert("L")
-    config = "--psm 6"
-    if digits:
-        config += " -c tessedit_char_whitelist=0123456789"
-    if scale is None:
-        scale = 1 if digits else 2
-    if scale != 1:
-        crop = crop.resize((crop.width * scale, crop.height * scale))
-    if bw:
-        crop = crop.point(lambda v: 255 if v > 180 else 0)
-    crop = ImageOps.expand(crop, border=20, fill=255)
-    text = pytesseract.image_to_string(crop, config=config)
-    return " ".join(text.replace("|", " ").split())
-
-
-def reread_numbers(img, row, cell_boxes):
-    # a row that fails ocr_check gets its numbers read a few other ways
-    # (bigger, black and white), and we keep the first combination that
-    # passes. if nothing does, the row stays as it was and gets flagged
-    number_cols = [c for c in cell_boxes if "Vote" in c]   # includes "Voters"
-    options = []
-    for col in number_cols:
-        reads = [row[col]]
-        for scale, bw in [(2, False), (1, True), (2, True)]:
-            text = ocr_cell(img, cell_boxes[col], digits=True, scale=scale, bw=bw)
-            if text not in reads:
-                reads.append(text)
-        options.append(reads)
-
-    for combo in itertools.product(*options):
-        trial = dict(row, **dict(zip(number_cols, combo)))
-        if not ocr_check(trial):
-            return trial
-    return row
-
-
-def ocr_tables(page, state):
-    # some reports have no actual text in them (the letters are just drawn
-    # shapes, or a font that comes out as "(cid:2)(cid:3)..."), so every cell
-    # reads as empty. for those we OCR the whole page once and put each word
-    # in the cell it sits in. returns the same shape as page.extract_tables().
-    # state carries the header over to the next page, since some of these
-    # reports only print it on the first page
-    import pytesseract
-    if TESSERACT:
-        pytesseract.pytesseract.tesseract_cmd = TESSERACT
-
-    grid = cell_grid(page)
-    if not grid:
-        return []
-
-    img = page.to_image(resolution=OCR_DPI).original
-    data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
-    k = 72 / OCR_DPI   # image pixels -> PDF points
-    words = []         # (x, y, text) at the middle of each word
-    for text, left, top, w, h in zip(data["text"], data["left"], data["top"],
-                                     data["width"], data["height"]):
-        if text.strip():
-            words.append(((left + w / 2) * k, (top + h / 2) * k, text))
-
-    header, columns = state.get("header"), state.get("columns")
-    table = [header] if header else []
-    for boxes in grid:
-        texts = [words_in(words, b) for b in boxes]
-
-        if any(t.replace(" ", "").lower() == "casenumber" for t in texts):
-            # header row: remember where each column is
-            if len(texts) in HEADERS:
-                header = HEADERS[len(texts)]
-            else:   # some other table shape, match each name to the closest known one
-                header = []
-                for t in texts:
-                    match = difflib.get_close_matches(t, ALL_HEADERS, n=1, cutoff=0.6)
-                    header.append(match[0] if match else t)
-            columns = [(b[0], b[2]) for b in boxes]
-            table.append(header)
-            continue
-        if columns is None:   # stuff above the first header, e.g. the summary
-            table.append(texts)
-            continue
-
-        # empty cells have no box drawn, so use the header's columns instead
-        # of this row's boxes. the row goes from its highest to lowest box
-        top = min(b[1] for b in boxes)
-        bottom = max(b[3] for b in boxes)
-        row, cell_boxes = {}, {}
-        for (x0, x1), name in zip(columns, header):
-            box = (x0, top, x1, bottom)
-            cell_boxes[name] = box
-            if name == "Case ID":
-                text = ""   # just a little picture in these PDFs, no text
-            elif "Vote" in name or "Proposition" in name:
-                text = ocr_cell(img, box, digits=True)
-            else:
-                text = words_in(words, box) or ocr_cell(img, box)
-            if name == "Case Number":
-                text = fix_case_no(text)
-                if not re.fullmatch(CASE_NO, text):   # try the cell on its own
-                    text = fix_case_no(ocr_cell(img, box))
-                # sometimes the "09-" at the front goes missing. it's always
-                # the same as the first number in the Region column, so add it back
-                part = re.fullmatch(r"-?([A-Z]{2}-\d{5,6})", text)
-                region = re.match(r"\d{2}", row.get("Region", ""))
-                if part and region:
-                    text = f"{region.group()}-{part.group(1)}"
-            # an empty WON/LOSS cell sometimes comes back as junk like "Hi"
-            if name == "Cert of Rep (Win)":
-                text = "WON" if "WON" in text.upper() else ""
-            if name == "Cert of Results (Loss)":
-                text = "LOSS" if "LOS" in text.upper() else ""
-            row[name] = text
-
-        # only real election rows, not the leftover bits of a split row
-        if re.fullmatch(CASE_NO, row.get("Case Number", "")) and ocr_check(row):
-            row = reread_numbers(img, row, cell_boxes)
-        table.append([row[name] for name in header])
-
-    state["header"], state["columns"] = header, columns
-
-    return [table]   # one "table" per page, the header rows sort it out
-
-
-def ocr_check(row):
-    # OCR gets maybe 1 number in 100 wrong or blank. these checks catch a lot
-    # of those, so the rows worth looking up on the case page are easy to find
-    if row.get("Case Type") == "UD" or row["Case Number"][3:5] == "UD":
-        return ""
-
-    def num(col):
-        value = row.get(col, "")
-        return int(value) if value.isdigit() else None
-
-    eligible = num("Num Eligible Voters")
-    against = num("Valid Votes Against")
-    votes_for = num("Votes for Labor Org 1")
-    if None in (eligible, against, votes_for):
-        return "missing number"
-
-    others = sum(num(c) or 0 for c in ("Votes for Labor Org 2", "Votes For Labor Org3"))
-    if votes_for + against + others > eligible:
-        return "more votes than voters"
-
-    won = bool(row.get("Cert of Rep (Win)"))
-    lost = bool(row.get("Cert of Results (Loss)"))
-    if others == 0 and won and not lost and votes_for <= against:
-        return "says WON but votes say lost"
-    if others == 0 and lost and not won and votes_for > against:
-        return "says LOSS but votes say won"
-    return ""
-
-
-def read_tables(pdf, source, use_ocr=False):
-    rows = []
-    ocr_state = {}
     # a table that carries on from the last page doesn't always repeat its
     # header, and sometimes the header itself gets cut in half by the page
     # break (top half at the bottom of one page, the rest on the next)
@@ -380,9 +136,8 @@ def read_tables(pdf, source, use_ocr=False):
         # tables don't always come out in page order, so go by table width
         prev_page_rows = dict(last_row_of)
         prev_page_last = rows[-1] if rows else None
-        tables = ocr_tables(page, ocr_state) if use_ocr else page.extract_tables()
 
-        for table in tables:
+        for table in page.extract_tables():
             header = None
             found = 0
             under_header = 0   # non-empty rows after the header
@@ -409,7 +164,7 @@ def read_tables(pdf, source, use_ocr=False):
                 row = dict(zip(header, cells))
                 if re.fullmatch(CASE_NO, row["Case Number"]):
                     row["source_pdf"] = source
-                    row["extraction_method"] = "ocr" if use_ocr else "table"
+                    row["extraction_method"] = "table"
                     row["page"] = page_no
                     rows.append(row)
                     last_row_of[len(cells)] = row
@@ -428,9 +183,6 @@ def read_tables(pdf, source, use_ocr=False):
                 last_header = header
             cut_header = header if header and under_header == 0 else None
 
-    if use_ocr:
-        for row in rows:
-            row["ocr_check"] = ocr_check(row)
     return rows
 
 
@@ -581,6 +333,12 @@ def convert_all():
     pdfs = sorted(PDF_DIR.glob("FY*/*.pdf"))
     print(f"\n{len(pdfs)} PDFs on disk")
 
+    # PDFs skipped last time are slow to open, so don't check them again
+    skipped = []
+    if SKIPPED_TXT.exists() and not REDO_CSVS:
+        skipped = SKIPPED_TXT.read_text(encoding="utf-8").splitlines()
+    already_skipped = {line.split(":")[0] for line in skipped}
+
     for pdf_path in pdfs:
         fy = pdf_path.parent.name
         if int(fy[2:]) < FIRST_FY:
@@ -588,10 +346,10 @@ def convert_all():
 
         csv_path = CSV_DIR / fy / (pdf_path.stem + ".csv")
         unparsed_path = UNPARSED_DIR / f"{fy}_{pdf_path.stem}.txt"
-        if csv_path.exists() and not REDO_CSVS:
+        source = f"{fy}/{pdf_path.name}"
+        if (csv_path.exists() or source in already_skipped) and not REDO_CSVS:
             continue
 
-        source = f"{fy}/{pdf_path.name}"
         unparsed = []
         columns = None   # None = keep the table's own columns
         how = "table"
@@ -601,17 +359,19 @@ def convert_all():
                 how = "text"
                 rows, unparsed = read_text(pdf, source)
                 columns = TEXT_COLUMNS
-            if not rows:
-                # no usable text at all, try reading the page images
-                how = "ocr"
-                rows = read_tables(pdf, source, use_ocr=True)
-                columns = None
-            if not rows:
-                first_page = pdf.pages[0].extract_text() or ""
-                if "produced no results" in " ".join(first_page.split()):
-                    how = "report is empty"
-                else:
-                    how = "nothing found, check this PDF"
+            first_page = " ".join((pdf.pages[0].extract_text() or "").split())
+
+        if not rows:
+            # nothing to save. either the report really has no elections in
+            # it (Oct 2025), or the PDF is just pictures of a table with no
+            # readable text (most of 2023, Apr 2019). we leave those out
+            if "produced no results" in first_page:
+                why = "report has no elections"
+            else:
+                why = "no readable text in the PDF"
+            skipped.append(f"{source}: {why}")
+            print(f"  {source}: skipped ({why})")
+            continue
 
         write_csv(rows, csv_path, columns)
 
@@ -624,13 +384,18 @@ def convert_all():
 
         print(f"  {source}: {len(rows)} rows ({how}), {len(unparsed)} unparsed")
 
+    if skipped:
+        SKIPPED_TXT.parent.mkdir(parents=True, exist_ok=True)
+        SKIPPED_TXT.write_text("\n".join(skipped) + "\n", encoding="utf-8")
+        print(f"\n{len(skipped)} PDFs skipped, see {SKIPPED_TXT}")
+
 
 if __name__ == "__main__":
     download_all()
     convert_all()
 
 
-'''
+r'''
 ----------------------------------------------------------------------
 TODO: cleaning (separate notebook, e.g. src/preprocess.ipynb)
 ----------------------------------------------------------------------
@@ -683,24 +448,19 @@ TODO: cleaning (separate notebook, e.g. src/preprocess.ipynb)
    reason out of after_result with r"(\d{1,2}/\d{1,2}/\d{4})\s+(.*)".
    Names can be cut off. case_id is just an ID, not a feature.
 
-9b. OCR files only (extraction_method == "ocr", most of 2023 and April
-   2019): about 1 number in 100 is still wrong or blank. Rows with
-   something in ocr_check didn't add up (missing number, more votes than
-   voters, WON/LOSS doesn't match the votes). Look those up on their case
-   page (nlrb.gov/case/<case number>) or drop them. Names can have small
-   typos ("Califarnia"), so match employers loosely. March 2023's PDF is
-   cut off on the right: no Closed Reason, and Closed Date is cut short,
-   so use the WON/LOSS columns for the target there.
-   October 2025's report has no elections in it at all (every section
-   says "produced no results"), so expect a gap that month.
+10. Missing months: data/skipped_pdfs.txt lists the reports we couldn't
+    read (Feb-Sep 2023, Apr 2019) plus Oct 2025, which has no elections
+    at all. Say so in the report, and expect a gap in any plot over time.
+    The reports go by the month a case CLOSED, so elections held in those
+    months can still show up in later reports.
 
-10. Before modeling, drop everything that's only known after the vote:
+11. Before modeling, drop everything that's only known after the vote:
     vote counts, closed date/reason, the WON/LOSS columns, Union To
     Certify. Also the bookkeeping ones (source_pdf, page, raw_line, ...).
 
-11. Split by election date (not closed date), test on the latest years,
+12. Split by election date (not closed date), test on the latest years,
     GroupKFold by employer inside the training years. Anything like a
     union's past win rate can only use earlier elections.
 
-12. Save to data/elections_clean.csv and write up the data documentation.
+13. Save to data/elections_clean.csv and write up the data documentation.
 '''

@@ -1,0 +1,10 @@
+FY2019/april-2019_1.pdf: no readable text in the PDF
+FY2023/april-2023.pdf: no readable text in the PDF
+FY2023/august-2023pdf.pdf: no readable text in the PDF
+FY2023/february-2023-pdfc.pdf: no readable text in the PDF
+FY2023/july-2023pdf_0.pdf: no readable text in the PDF
+FY2023/june-2023-pdf.pdf: no readable text in the PDF
+FY2023/march-2023-pdf.pdf: no readable text in the PDF
+FY2023/may-2023.pdf: no readable text in the PDF
+FY2023/september-2023-pdf.pdf: no readable text in the PDF
+FY2026/cases-closed-oct-2025.pdf: report has no elections
