@@ -186,9 +186,13 @@ VOTE_KEY = ["case_number", "election_date", "eligible", "votes_for", "votes_agai
 # multi-union cell below to keep only 1-union elections. it has to be
 # counted here, before repeats are dropped: an election listed in both the
 # 1-union and 2-union tables could keep its 1-union copy and pass as a
-# 1-union election. taking the max over all copies makes every copy say 2
+# 1-union election. taking the max over every row with the same case and
+# election date makes every copy say 2. this goes by case + date, not the
+# full VOTE_KEY, because a few multi-union elections also have a 1-union row
+# with different counts (a runoff, or one union's votes split out, e.g.
+# 29-RC-216339, 05-RC-323238). those aren't clean 1-union elections either
 df["n_unions"] = (df[["union_name", "union_name_2", "union_name_3"]] != "").sum(axis=1)
-df["n_unions"] = df.groupby(VOTE_KEY, dropna=False)["n_unions"].transform("max")
+df["n_unions"] = df.groupby(["case_number", "election_date"], dropna=False)["n_unions"].transform("max")
 
 # most repeats are reports that overlap (Sep/Oct 2022, Dec 2018/Jan 2019),
 # but a few cases were reopened and closed again with a different outcome
