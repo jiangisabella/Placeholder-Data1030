@@ -182,8 +182,11 @@ df = df[df["case_type"].isin(CASE_TYPES)].copy()
 
 VOTE_KEY = ["case_number", "election_date", "eligible", "votes_for", "votes_against"]
 
-# count unions on the ballot before dropping repeats: a case listed in both
-# the 1-union and 2-union tables is a 2-union election, whichever copy is kept
+# n_unions = how many unions were on the ballot (1, 2 or 3), used in the
+# multi-union cell below to keep only 1-union elections. it has to be
+# counted here, before repeats are dropped: an election listed in both the
+# 1-union and 2-union tables could keep its 1-union copy and pass as a
+# 1-union election. taking the max over all copies makes every copy say 2
 df["n_unions"] = (df[["union_name", "union_name_2", "union_name_3"]] != "").sum(axis=1)
 df["n_unions"] = df.groupby(VOTE_KEY, dropna=False)["n_unions"].transform("max")
 
@@ -212,12 +215,14 @@ df = df[~(twin & df.duplicated(SAME_VOTE, keep="first"))].copy()
 
 
 # %%
-# ---------- multi-union elections ----------
-# 2 or 3 unions on the ballot. votes_for only counts union 1 there, so the
-# win/loss and vote share mean something different. dropped for now
+# ---------- multi-union elections: keep 1-union only ----------
+# elections with 2 or 3 unions on the ballot are dropped. votes_for only
+# counts union 1 there, so the win/loss and vote share mean something
+# different. from here on every row is a single-union election
 
 print(f"\nunions on the ballot: {df['n_unions'].value_counts().sort_index().to_dict()}")
-df = df[df["n_unions"] <= 1].copy()
+print(f"dropping {(df['n_unions'] > 1).sum()} elections with 2+ unions, keeping {(df['n_unions'] == 1).sum()}")
+df = df[df["n_unions"] == 1].copy()
 
 
 # %%
