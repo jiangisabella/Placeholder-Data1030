@@ -1,1 +1,1 @@
-source_pdf,extraction_method,layout,parse_note,section,case_number,case_id,case_name,case_type,city,state,file_date,closed_reason,closed_date,election_date,eligible,votes_for,votes_against,vote_numbers,union_name,election_method,election_type_code,industry_code,unit_type,result,after_result,raw_line
+source_pdf,extraction_method,page
