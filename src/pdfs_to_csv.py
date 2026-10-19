@@ -373,10 +373,13 @@ def read_tables(pdf, source, use_ocr=False):
     # break (top half at the bottom of one page, the rest on the next)
     last_header = None   # header of the previous table
     cut_header = None    # previous table was just a header with nothing under it
+    last_row_of = {}     # number of columns -> last row read from a table that wide
     for page_no, page in enumerate(pdf.pages, start=1):
         # a row can get cut by a page break. the rest of it is at the top of
-        # the next page, with no case number, so keep track of the last row
-        last_row = rows[-1] if rows else None
+        # the next page, with no case number, so keep track of the last row.
+        # tables don't always come out in page order, so go by table width
+        prev_page_rows = dict(last_row_of)
+        prev_page_last = rows[-1] if rows else None
         tables = ocr_tables(page, ocr_state) if use_ocr else page.extract_tables()
 
         for table in tables:
@@ -409,11 +412,16 @@ def read_tables(pdf, source, use_ocr=False):
                     row["extraction_method"] = "ocr" if use_ocr else "table"
                     row["page"] = page_no
                     rows.append(row)
+                    last_row_of[len(cells)] = row
                     found += 1
-                elif last_row and found == 0 and not re.search(CASE_NO, " ".join(cells)):
-                    # leftover bit of the last row from the previous page
+                    continue
+                last_row = prev_page_rows.get(len(cells)) or prev_page_last
+                if last_row and found == 0 and not re.search(CASE_NO, " ".join(cells)):
+                    # leftover bit of the last row from the previous page.
+                    # skip section titles like "NLRB Elections with 3 Labor
+                    # Organization" (which come with some html junk)
                     for col, text in row.items():
-                        if text and col != "Case Number":
+                        if text and col != "Case Number" and not text.startswith("NLRB Elections"):
                             last_row[col] = (last_row.get(col, "") + " " + text).strip()
 
             if header:
