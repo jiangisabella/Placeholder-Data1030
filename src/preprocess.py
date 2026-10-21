@@ -172,6 +172,14 @@ print(f"case type column disagrees with case number: {mismatch.sum()}")
 print(f"case types: {df['case_type'].value_counts().to_dict()}, keeping {CASE_TYPES}")
 df = df[df["case_type"].isin(CASE_TYPES)].copy()
 
+# raw columns nothing below uses: region_offices/case_type_reported are
+# covered by case_number, case_id is an internal id, the proposition and
+# union 2/3 vote columns are for UD and multi-union cases (both dropped),
+# union_to_certify is only known after the vote
+df = df.drop(columns=["region_offices", "case_id", "case_type_reported", "page",
+                      "for_proposition", "against_proposition", "votes_for_2", "votes_for_3",
+                      "union_to_certify"])
+
 
 # %%
 # ---------- duplicates ----------
@@ -226,7 +234,7 @@ df = df[~(twin & df.duplicated(SAME_VOTE, keep="first"))].copy()
 
 print(f"\nunions on the ballot: {df['n_unions'].value_counts().sort_index().to_dict()}")
 print(f"dropping {(df['n_unions'] > 1).sum()} elections with 2+ unions, keeping {(df['n_unions'] == 1).sum()}")
-df = df[df["n_unions"] == 1].copy()
+df = df[df["n_unions"] == 1].drop(columns=["n_unions", "has_reason", "union_name_2", "union_name_3"])
 
 
 # %%
@@ -252,26 +260,39 @@ print(f"target taken from WON/LOSS column instead of closed reason: {fallback.su
 print(f"no target at all (dropped): {(df['union_won'] == -1).sum()}")
 df = df[df["union_won"] != -1].copy()
 
-# sanity check against the vote counts (tie = loss)
-df["majority_for"] = (df["votes_for"] > df["votes_against"]).astype(int)
-print("\nunion_won vs majority of votes:")
-print(pd.crosstab(df["union_won"], df["majority_for"]))
 print("\nunion_won vs the report's WON/LOSS columns:")
 print(pd.crosstab(df["union_won"], df["reported_result"]))
+df = df.drop(columns=["reported_win_loss", "reported_win", "reported_loss", "reported_result"])
 
 
 # %%
-# ---------- vote checks ----------
+# ---------- vote checks, then drop what's only known after the vote ----------
+# printed only, nothing is kept as a column
 
-df["total_votes"] = df["votes_for"] + df["votes_against"]
-df["vote_share"] = np.where(df["total_votes"] > 0, df["votes_for"] / df["total_votes"].replace(0, np.nan), np.nan)
-df["turnout"] = np.where(df["eligible"] > 0, df["total_votes"] / df["eligible"].replace(0, np.nan), np.nan)
+# sanity check against the vote counts (tie = loss)
+majority_for = (df["votes_for"] > df["votes_against"]).astype(int).rename("majority_for")
+print("\nunion_won vs majority of votes:")
+print(pd.crosstab(df["union_won"], majority_for))
+
 # the PDFs really do have some of these (e.g. 2 eligible, 57 votes in Apr 2012)
-df["flag_votes_gt_eligible"] = df["total_votes"] > df["eligible"]
-df["flag_no_votes"] = df["total_votes"] == 0
-print(f"\nmore votes than eligible voters: {df['flag_votes_gt_eligible'].sum()}")
-print(f"no valid votes: {df['flag_no_votes'].sum()}")
+total_votes = df["votes_for"] + df["votes_against"]
+print(f"\nmore votes than eligible voters: {(total_votes > df['eligible']).sum()}")
+print(f"no valid votes: {(total_votes == 0).sum()}")
 print(f"eligible == 0 or missing: {((df['eligible'] == 0) | df['eligible'].isna()).sum()}")
+
+# an election can't happen after its case closed. these are typos in the
+# PDF (17-RD-076109 has 05/08/2102), so treat them as missing
+bad = df["election_date"] > df["closed_date"]
+print(f"\nelection date after the case closed (set to missing): {bad.sum()} "
+      f"{df.loc[bad, 'election_date'].dt.date.tolist()}")
+df.loc[bad, "election_date"] = pd.NaT
+print(f"no election date: {df['election_date'].isna().sum()}")
+closed_late = (df["closed_date"] - df["election_date"]).dt.days > 365
+print(f"closed more than a year after the vote: {closed_late.sum()}")
+
+# the vote counts and how the case closed come after the vote, and
+# union_won already holds what we need from them
+df = df.drop(columns=["votes_for", "votes_against", "closed_date", "closed_reason"])
 
 
 # %%
@@ -291,8 +312,6 @@ for region, states in {
 df["state"] = df["state"].str.upper()
 df["census_region"] = df["state"].map(CENSUS_REGION).fillna("Unknown")
 print(f"\nstates with no census region: {df.loc[df['census_region'] == 'Unknown', 'state'].value_counts().to_dict()}")
-
-df["log_eligible"] = np.log1p(df["eligible"])
 
 # parent union by keyword. first match wins, so the order matters
 # (Workers United is SEIU-affiliated but kept on its own)
@@ -329,22 +348,6 @@ emp = df["case_name"].str.lower()
 emp = emp.str.split(r"\s+(?:d/b/a|dba|d\.b\.a\.|t/a)\s+", regex=True).str[0]
 emp = emp.str.replace(r"[^a-z0-9 ]", " ", regex=True).str.replace(SUFFIXES, " ", regex=True)
 df["employer"] = emp.str.split().str.join(" ")
-
-# an election can't happen after its case closed. these are typos in the
-# PDF (17-RD-076109 has 05/08/2102), so treat them as missing
-bad = df["election_date"] > df["closed_date"]
-print(f"\nelection date after the case closed (set to missing): {bad.sum()} "
-      f"{df.loc[bad, 'election_date'].dt.date.tolist()}")
-df.loc[bad, "election_date"] = pd.NaT
-
-df["election_year"] = df["election_date"].dt.year
-df["election_month"] = df["election_date"].dt.month
-# only FY2012 reports have a file date
-df["days_file_to_election"] = (df["election_date"] - df["file_date"]).dt.days
-df["days_election_to_close"] = (df["closed_date"] - df["election_date"]).dt.days
-df["flag_closed_years_later"] = df["days_election_to_close"] > 365
-print(f"\nno election date: {df['election_date'].isna().sum()}")
-print(f"closed more than a year after the vote: {df['flag_closed_years_later'].sum()}")
 
 
 # %%
@@ -423,11 +426,10 @@ docket["activity_date"] = to_date(docket["activity_date"])
 is_petition = docket["document"].str.match(r"Signed (?:Amended )?R[CDM] Petition")
 petition_date = docket[is_petition].groupby("case_number")["activity_date"].min().rename("petition_date")
 
-# match each document to the elections in its case, then split before/after
+# match each document to the elections in its case, keep the ones filed before the vote
 elections = df[["case_number", "election_date"]].drop_duplicates().dropna()
 docs = docket.merge(elections, on="case_number")
 before = docs[docs["activity_date"] < docs["election_date"]].copy()
-after = docs[docs["activity_date"] >= docs["election_date"]].copy()
 
 doc = before["document"].str.lower()
 before["hearing"] = doc.str.contains(r"hearing officer|post-hearing brief|pre-hearing brief|decision and direction")
@@ -435,9 +437,6 @@ before["postponed"] = doc.str.contains(r"reschedule hearing|postpone")
 before["blocking"] = doc.str.contains(r"ulp|blocking|request to proceed")
 before["review"] = doc.str.contains(r"request for review|rfr ")
 before["by_employer"] = before["issued_filed_by"] == "Employer"
-doc = after["document"].str.lower()
-after["objections"] = doc.str.contains(r"objections to an election")
-after["board"] = after["issued_filed_by"] == "NLRB - Board"
 
 KEY = ["case_number", "election_date"]
 pre = before.groupby(KEY).agg(
@@ -448,11 +447,7 @@ pre = before.groupby(KEY).agg(
     pre_request_review=("review", "any"),
     n_employer_filings_before_vote=("by_employer", "sum"),
 )
-post = after.groupby(KEY).agg(
-    objections_filed=("objections", "any"),
-    board_involved_after_vote=("board", "any"),
-)
-case_docket = elections.merge(pre.reset_index(), on=KEY, how="left").merge(post.reset_index(), on=KEY, how="left")
+case_docket = elections.merge(pre.reset_index(), on=KEY, how="left")
 for col in case_docket.columns.drop(KEY):
     case_docket[col] = case_docket[col].fillna(0).astype(int)
 
@@ -477,30 +472,26 @@ print(df["days_petition_to_election"].describe().round(1).to_dict())
 # %%
 # ---------- save ----------
 
+# column order for the output. everything here is known before the vote
+# except the target (post-vote columns were dropped in the vote checks cell)
 KEEP = [
     # ids / bookkeeping
     "source_pdf", "fiscal_year", "case_number", "case_type", "region",
-    # known before the vote
+    # from the reports
     "case_name", "employer", "city", "state", "census_region",
-    "union_name", "parent_union", "method", "eligible", "log_eligible",
-    "file_date", "election_date", "election_year", "election_month", "days_file_to_election",
-    # known before the vote: participants
+    "union_name", "parent_union", "method", "eligible", "file_date", "election_date",
+    # participants
     "n_participants", "employer_has_lawyer", "n_employer_lawyers", "employer_mgmt_firm",
     "employer_law_firm", "petitioner_has_lawyer", "n_petitioner_lawyers",
     "has_intervenor",
-    # known before the vote: docket
+    # docket
     "petition_date", "days_petition_to_election", "n_docs_before_vote", "pre_hearing",
     "pre_postponed", "pre_ulp_blocking", "pre_request_review", "n_employer_filings_before_vote",
-    # only known after the vote (drop these before modeling)
-    "votes_for", "votes_against", "total_votes", "vote_share", "turnout", "majority_for",
-    "closed_date", "closed_reason", "days_election_to_close", "reported_result", "union_to_certify",
-    "objections_filed", "board_involved_after_vote",
-    # checks
-    "flag_votes_gt_eligible", "flag_no_votes", "flag_closed_years_later",
     "has_docket", "docket_truncated",
     # target
     "union_won",
 ]
+assert set(KEEP) == set(df.columns), set(KEEP) ^ set(df.columns)
 clean = df[KEEP].sort_values(["election_date", "case_number"]).reset_index(drop=True)
 clean.to_csv(OUT_CSV, index=False)
 print(f"\nsaved {clean.shape} to {OUT_CSV}")
@@ -518,13 +509,13 @@ TODO (still to do)
   Mention the gap in the report and expect a dip in plots over time.
 - Several reports hold fewer rows than their own summary (Jun 2012,
   Sep 2020, most of FY2021, Dec 2021). The data just isn't in the PDF.
-- Before modeling, drop everything listed under "only known after the vote"
-  above, plus the bookkeeping columns.
+- Before modeling, drop the bookkeeping columns.
 - Split by election date (test on the latest years), GroupKFold by employer
   inside the training years. Anything like a union's past win rate can only
   use earlier elections.
-- Look at the rows flagged above (votes > eligible, closed years later,
-  union_won disagreeing with the vote majority) and decide drop vs keep.
+- Look at the rows the vote checks print (votes > eligible, closed years
+  later, union_won disagreeing with the vote majority) and decide drop vs
+  keep. That has to happen in that cell, before the vote columns are dropped.
 - Docket: src/docket_scraping.py only reads the first page (10 newest
   documents). ~1,800 elections are cut off, and since the newest documents
   are the post-vote ones (objections, Board decisions), the cut-off cases
