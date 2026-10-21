@@ -202,6 +202,14 @@ VOTE_KEY = ["case_number", "election_date", "eligible", "votes_for", "votes_agai
 df["n_unions"] = (df[["union_name", "union_name_2", "union_name_3"]] != "").sum(axis=1)
 df["n_unions"] = df.groupby(["case_number", "election_date"], dropna=False)["n_unions"].transform("max")
 
+# n_units = how many different votes (eligible + counts) one case has on one
+# election date, across every report. more than 1 = separate voting units
+# (e.g. professionals and non-professionals), used in the target cell.
+# also counted before repeats are dropped, so every listing is seen
+units = df[["case_number", "election_date", "eligible", "votes_for", "votes_against"]].drop_duplicates()
+n_units = units.groupby(["case_number", "election_date"]).size().rename("n_units")
+df = df.merge(n_units, on=["case_number", "election_date"], how="left")
+
 # most repeats are reports that overlap (Sep/Oct 2022, Dec 2018/Jan 2019),
 # but a few cases were reopened and closed again with a different outcome
 # (29-RC-198745: Results in Jun 2017, Representative in Aug 2017). keep the
@@ -238,6 +246,40 @@ df = df[df["n_unions"] == 1].drop(columns=["n_unions", "has_reason", "union_name
 
 
 # %%
+# ---------- docket: load ----------
+# loaded here because the target and election date fixes below use it, the
+# features from it are built further down. the docket comes from the live
+# case pages on nlrb.gov, so it's a second record next to the monthly reports
+#
+# heads up: the scraper only read the first page of each docket, which is
+# the 10 newest documents. long (usually contested) cases lose their oldest
+# documents, often the petition. docket_truncated marks those
+
+docket = pd.read_csv(DOCKET_CSV, dtype=str)
+# count before dropping repeats: a first page of 10 can hold the same document twice
+n_docs = docket.groupby("case_number").size()
+truncated = n_docs[n_docs >= 10].index
+docket = docket.drop_duplicates()
+docket["document"] = docket["document"].str.rstrip("*").str.strip()
+docket["activity_date"] = to_date(docket["activity_date"])
+
+# the certification the case got and its first tally of ballots. both come
+# after the vote, so they only check the target and fill missing election
+# dates, they're never features. docket_cert: 1 = Representative,
+# 0 = Results, -1 = neither or both
+doc = docket["document"].fillna("")
+certs = pd.DataFrame({
+    "case_number": docket["case_number"],
+    "rep": doc.str.contains("Certification of Representative"),
+    "res": doc.str.contains("Certification of Results"),
+}).groupby("case_number")[["rep", "res"]].any()
+docket_both = certs["rep"] & certs["res"]
+docket_cert = pd.Series(np.select([certs["rep"] & ~certs["res"], certs["res"] & ~certs["rep"]], [1, 0], -1),
+                        index=certs.index)
+first_tally = docket[doc.str.contains("Tally of Ballots")].groupby("case_number")["activity_date"].min()
+
+
+# %%
 # ---------- target ----------
 # union_won = 1 if the case closed with a Certification of Representative,
 # 0 if Certification of Results. (if RD cases are added back, 1 there
@@ -262,7 +304,35 @@ df = df[df["union_won"] != -1].copy()
 
 print("\nunion_won vs the report's WON/LOSS columns:")
 print(pd.crosstab(df["union_won"], df["reported_result"]))
-df = df.drop(columns=["reported_win_loss", "reported_win", "reported_loss", "reported_result"])
+
+# checking the target against the docket (data/data_checks.md, check 7).
+# the report's own tally and WON/LOSS column are the second opinion
+cert = df["case_number"].map(docket_cert).fillna(-1)
+majority_for = (df["votes_for"] > df["votes_against"]).astype(int)
+reported = df["reported_result"].map({"won": 1, "lost": 0})
+
+# multi-unit cases: separate groups of employees voting the same day, each
+# on a ballot with the same single union. the report repeats the case's
+# outcome on every unit's row, so a unit that lost can say won
+# (22-RC-153083: 5-3 and 4-12, both "Representative"). spotted by different
+# counts for one case + date, or a docket with both kinds of certification
+multi_unit = (df["n_units"] > 1) | df["case_number"].map(docket_both).fillna(False).astype(bool)
+
+# the report's closed reason is wrong when the docket disagrees and the
+# tally or WON/LOSS column on the same row agrees with the docket
+# (31-RC-140133: 32-15 vote, report says Results, docket has a
+# Certification of Representative on the closing date)
+fix = (cert != -1) & (cert != df["union_won"]) & ((majority_for == cert) | (reported == cert)) & ~multi_unit
+
+# a unit whose label contradicts its own tally can't be sorted out, and
+# neither can a row marked both WON and LOSS that the docket doesn't settle
+unclear = (multi_unit | (df["reported_result"] == "both")) & (df["union_won"] != majority_for) & ~fix
+
+df.loc[fix, "union_won"] = cert[fix].astype(int)
+print(f"\nlabel corrected from the docket: {fix.sum()} "
+      f"({(cert[fix] == 1).sum()} to won, {(cert[fix] == 0).sum()} to lost)")
+print(f"multi-unit or both WON and LOSS, label contradicts its own tally (dropped): {unclear.sum()}")
+df = df[~unclear].drop(columns=["reported_win_loss", "reported_win", "reported_loss", "reported_result", "n_units"])
 
 
 # %%
@@ -274,11 +344,17 @@ majority_for = (df["votes_for"] > df["votes_against"]).astype(int).rename("major
 print("\nunion_won vs majority of votes:")
 print(pd.crosstab(df["union_won"], majority_for))
 
-# the PDFs really do have some of these (e.g. 2 eligible, 57 votes in Apr 2012)
+# the PDFs really do have some of these (e.g. 2 eligible, 57 votes in Apr 2012).
+# the label is fine on these rows, and the counts are dropped below
 total_votes = df["votes_for"] + df["votes_against"]
 print(f"\nmore votes than eligible voters: {(total_votes > df['eligible']).sum()}")
 print(f"no valid votes: {(total_votes == 0).sum()}")
 print(f"eligible == 0 or missing: {((df['eligible'] == 0) | df['eligible'].isna()).sum()}")
+
+# an eligible count of 0 means it wasn't entered (12-RC-197840 shows 0
+# eligible next to 231 ballots, on nlrb.gov too), so it's missing, not a
+# tiny unit. filling it in is left to the model pipeline
+df.loc[df["eligible"] == 0, "eligible"] = np.nan
 
 # an election can't happen after its case closed. these are typos in the
 # PDF (17-RD-076109 has 05/08/2102), so treat them as missing
@@ -286,7 +362,16 @@ bad = df["election_date"] > df["closed_date"]
 print(f"\nelection date after the case closed (set to missing): {bad.sum()} "
       f"{df.loc[bad, 'election_date'].dt.date.tolist()}")
 df.loc[bad, "election_date"] = pd.NaT
-print(f"no election date: {df['election_date'].isna().sum()}")
+
+# missing election dates (mostly blank in the PDF): use the first Tally of
+# Ballots in the docket, which for most elections is the day of the vote
+# (median 0 days). rows with no tally can't be placed in time, so dropped
+tally = df["case_number"].map(first_tally)
+fill = df["election_date"].isna() & tally.notna()
+df.loc[fill, "election_date"] = tally[fill]
+print(f"no election date: {fill.sum() + df['election_date'].isna().sum()}, filled from the docket "
+      f"tally: {fill.sum()}, no tally (dropped): {df['election_date'].isna().sum()}")
+df = df[df["election_date"].notna()].copy()
 closed_late = (df["closed_date"] - df["election_date"]).dt.days > 365
 print(f"closed more than a year after the vote: {closed_late.sum()}")
 
@@ -408,19 +493,7 @@ print(df[["employer_has_lawyer", "employer_mgmt_firm", "petitioner_has_lawyer",
 # the documents filed in each case. only what was filed BEFORE the vote can
 # be a feature; tallies, certifications and objections come after it.
 # grouped by case + election date since a rerun election keeps the same
-# case number
-#
-# heads up: the scraper only read the first page of each docket, which is
-# the 10 newest documents. long (usually contested) cases lose their oldest
-# documents, often the petition. docket_truncated marks those
-
-docket = pd.read_csv(DOCKET_CSV, dtype=str)
-# count before dropping repeats: a first page of 10 can hold the same document twice
-n_docs = docket.groupby("case_number").size()
-truncated = n_docs[n_docs >= 10].index
-docket = docket.drop_duplicates()
-docket["document"] = docket["document"].str.rstrip("*").str.strip()
-docket["activity_date"] = to_date(docket["activity_date"])
+# case number. (the docket itself is loaded above the target cell)
 
 # petition date = earliest signed petition (amended or not)
 is_petition = docket["document"].str.match(r"Signed (?:Amended )?R[CDM] Petition")
@@ -513,9 +586,9 @@ TODO (still to do)
 - Split by election date (test on the latest years), GroupKFold by employer
   inside the training years. Anything like a union's past win rate can only
   use earlier elections.
-- Look at the rows the vote checks print (votes > eligible, closed years
-  later, union_won disagreeing with the vote majority) and decide drop vs
-  keep. That has to happen in that cell, before the vote columns are dropped.
+- The rows the checks flag were looked into in data/data_checks.md, and the
+  fixes from there are applied above. Any new fix that needs the vote counts
+  has to go before the vote checks cell drops them.
 - Docket: src/docket_scraping.py only reads the first page (10 newest
   documents). ~1,800 elections are cut off, and since the newest documents
   are the post-vote ones (objections, Board decisions), the cut-off cases
