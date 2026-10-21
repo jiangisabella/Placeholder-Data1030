@@ -1,233 +1,329 @@
 
 import csv
-import re
+import json
+import sqlite3
 import time
+from collections import Counter
 from pathlib import Path
 
 import requests
 from bs4 import BeautifulSoup
 
 
-INPUT_DIR = Path("data/raw_csvs")
-OUTPUT_DIR = Path("data")
+# Configuration
+
+DATA_DIR = Path("data")
+
+OLD_DOCKET_FILE = DATA_DIR / "docket_activity.csv"
+NEW_DOCKET_FILE = DATA_DIR / "docket_activity_full.csv"
+MERGED_DOCKET_FILE = DATA_DIR / "docket_activity_merged.csv"
+CHECKPOINT_FILE = DATA_DIR / "docket_full_checkpoint.sqlite"
 
 MAX_CASES = None
 REQUEST_DELAY = 0.5
-CASE_PATTERN = re.compile(r"^\d{2}-R[CDM]-\d{5,6}$")
-
-DOCKET_FILE = OUTPUT_DIR / "docket_activity.csv"
-STATUS_FILE = OUTPUT_DIR / "docket_scraping_status.csv"
-PARTICIPANT_FILE = OUTPUT_DIR / "case_participants_raw.csv"
-PARTICIPANT_STATUS_FILE = OUTPUT_DIR / "participant_scraping_status.csv"
 
 DOCKET_COLUMNS = [
-    "case_number", "activity_date", "document", "issued_filed_by"
+    "case_number",
+    "activity_date",
+    "document",
+    "issued_filed_by",
 ]
 
-PARTICIPANT_COLUMNS = [
-    "case_number", "participant_raw_text"
-]
-
-STATUS_COLUMNS = [
-    "case_number", "status", "activity_count", "error"
-]
-
-PARTICIPANT_STATUS_COLUMNS = [
-    "case_number", "status", "participant_count", "error"
-]
-
-HEADERS = {"User-Agent": "DATA1030 student research project"}
+HEADERS = {
+    "User-Agent": "DATA1030 student research project"
+}
 
 
-def load_case_numbers(folder):
-    cases = set()
-    yearly_counts = {}
+# 1. Find cases with exactly 10 docket records
 
-    csv_files = sorted(folder.glob("FY*/*.csv"))
-    print(f"Found {len(csv_files)} CSV files")
+def load_truncated_cases():
+    with OLD_DOCKET_FILE.open(
+        "r", newline="", encoding="utf-8"
+    ) as f:
+        counts = Counter(
+            row["case_number"]
+            for row in csv.DictReader(f)
+        )
 
-    for csv_path in csv_files:
-        fiscal_year = csv_path.parent.name
-        yearly_counts.setdefault(fiscal_year, set())
+    cases = sorted(
+        case for case, count in counts.items()
+        if count == 10
+    )
 
-        with csv_path.open("r", newline="", encoding="utf-8-sig") as f:
-            reader = csv.DictReader(f)
-
-            for row in reader:
-                case_number = (
-                    row.get("Case Number")
-                    or row.get("case_number")
-                    or ""
-                ).strip().upper()
-
-                if CASE_PATTERN.fullmatch(case_number):
-                    cases.add(case_number)
-                    yearly_counts[fiscal_year].add(case_number)
-
-    print("\nUnique cases by fiscal year:")
-    for year in sorted(yearly_counts):
-        print(f"{year}: {len(yearly_counts[year])}")
-
-    return sorted(cases)
+    print(f"Cases with exactly 10 activities: {len(cases)}")
+    return cases
 
 
-def scrape_case(case_number, session):
-    url = f"https://www.nlrb.gov/case/{case_number}"
-    response = session.get(url, headers=HEADERS, timeout=30)
+# 2. Scrape the full docket using NLRB's AJAX endpoint
+
+def scrape_full_docket(case_number, session):
+    url = (
+        f"https://www.nlrb.gov/sort-case-decisions-cp/{case_number}"
+        "/ds_activity+desc/case-docket-activity/ds-activity-date/1"
+    )
+
+    response = session.get(
+        url,
+        params={"_wrapper_format": "drupal_ajax"},
+        headers=HEADERS,
+        timeout=30,
+    )
 
     if response.status_code in (403, 429):
-        raise RuntimeError(f"Access restricted: HTTP {response.status_code}")
+        raise RuntimeError(
+            f"Access restricted: HTTP {response.status_code}"
+        )
+
+    if response.status_code >= 500:
+        raise RuntimeError(
+            f"NLRB server error: HTTP {response.status_code}"
+        )
 
     response.raise_for_status()
-    soup = BeautifulSoup(response.text, "html.parser")
+    commands = response.json()
 
-    docket_table = None
-    participant_table = None
+    if not isinstance(commands, list):
+        raise ValueError("Unexpected AJAX response")
 
-    for table in soup.find_all("table"):
-        headers = [
-            th.get_text(" ", strip=True).lower()
-            for th in table.find_all("th")
-        ]
+    html = None
 
-        if "date" in headers and "document" in headers:
-            docket_table = table
+    for item in commands:
+        if (
+            isinstance(item, dict)
+            and item.get("command") == "insert"
+            and item.get("selector") == "#case_docket_activity_data"
+        ):
+            html = item.get("data")
+            break
 
-        if any("participant" in h for h in headers):
-            participant_table = table
+    if not html:
+        raise ValueError("Docket HTML not found")
 
-    if docket_table is None:
-        raise ValueError("Docket Activity table not found")
+    soup = BeautifulSoup(html, "html.parser")
+    table = soup.select_one("table.docket-activity-table")
 
-    if participant_table is None:
-        raise ValueError("Participants table not found")
+    if table is None:
+        raise ValueError("Docket table not found")
 
-    docket_records = []
+    # Check that the AJAX response is showing "All".
+    page_size = soup.select_one(
+        'select[name="items_per_page"] option[selected]'
+    )
 
-    for row in docket_table.find_all("tr"):
+    if page_size is None or page_size.get_text(
+        " ", strip=True
+    ).lower() != "all":
+        raise ValueError("AJAX response is not showing All entries")
+
+    records = []
+
+    for row in table.select("tbody tr"):
         cells = row.find_all("td")
 
         if len(cells) < 3:
             continue
 
-        docket_records.append({
+        records.append({
             "case_number": case_number,
             "activity_date": cells[0].get_text(" ", strip=True),
             "document": cells[1].get_text(" ", strip=True),
             "issued_filed_by": cells[2].get_text(" ", strip=True),
         })
 
-    participant_records = []
+    # These cases previously had 10 records.
+    # Fewer than 10 suggests a scraping problem.
+    if len(records) < 10:
+        raise ValueError(
+            f"Expected at least 10 activities, got {len(records)}"
+        )
 
-    for row in participant_table.find_all("tr"):
-        cells = row.find_all("td")
-
-        if not cells:
-            continue
-
-        raw_text = cells[0].get_text("\n", strip=True)
-
-        if raw_text:
-            participant_records.append({
-                "case_number": case_number,
-                "participant_raw_text": raw_text,
-            })
-
-    return docket_records, participant_records
+    return records
 
 
-def append_rows(path, rows, columns):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    write_header = not path.exists() or path.stat().st_size == 0
+# 3. Store completed cases safely
 
-    with path.open("a", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=columns)
+def open_checkpoint():
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-        if write_header:
-            writer.writeheader()
+    conn = sqlite3.connect(CHECKPOINT_FILE)
 
-        writer.writerows(rows)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS completed_cases (
+            case_number TEXT PRIMARY KEY,
+            docket_json TEXT NOT NULL
+        )
+    """)
+
+    conn.commit()
+    return conn
 
 
-def load_completed_cases(path):
-    completed = set()
+def load_completed_cases(conn):
+    rows = conn.execute(
+        "SELECT case_number FROM completed_cases"
+    ).fetchall()
 
-    if not path.exists():
-        return completed
+    return {row[0] for row in rows}
 
-    with path.open("r", newline="", encoding="utf-8") as f:
-        for row in csv.DictReader(f):
-            if row.get("status") == "success":
-                completed.add(row["case_number"])
 
-    return completed
+def save_case(conn, case_number, records):
+    with conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO completed_cases
+            (case_number, docket_json)
+            VALUES (?, ?)
+            """,
+            (case_number, json.dumps(records)),
+        )
 
+
+# 4. Export the re-scraped docket data
+
+def export_full_docket(conn):
+    temporary_file = NEW_DOCKET_FILE.with_suffix(".csv.tmp")
+
+    with temporary_file.open(
+        "w", newline="", encoding="utf-8"
+    ) as f:
+        writer = csv.DictWriter(
+            f, fieldnames=DOCKET_COLUMNS
+        )
+        writer.writeheader()
+
+        for case_number, docket_json in conn.execute("""
+            SELECT case_number, docket_json
+            FROM completed_cases
+            ORDER BY case_number
+        """):
+            writer.writerows(json.loads(docket_json))
+
+    temporary_file.replace(NEW_DOCKET_FILE)
+
+
+# 5. Merge new full docket with the original data
+
+def export_merged_docket(conn):
+    replaced_cases = load_completed_cases(conn)
+
+    temporary_file = MERGED_DOCKET_FILE.with_suffix(
+        ".csv.tmp"
+    )
+
+    old_rows = 0
+    new_rows = 0
+
+    with temporary_file.open(
+        "w", newline="", encoding="utf-8"
+    ) as output:
+        writer = csv.DictWriter(
+            output, fieldnames=DOCKET_COLUMNS
+        )
+        writer.writeheader()
+
+        # Keep old records unless that case was re-scraped.
+        with OLD_DOCKET_FILE.open(
+            "r", newline="", encoding="utf-8"
+        ) as original:
+            for row in csv.DictReader(original):
+                if row["case_number"] not in replaced_cases:
+                    writer.writerow({
+                        col: row[col] for col in DOCKET_COLUMNS
+                    })
+                    old_rows += 1
+
+        # Add complete records for re-scraped cases.
+        for case_number, docket_json in conn.execute("""
+            SELECT case_number, docket_json
+            FROM completed_cases
+            ORDER BY case_number
+        """):
+            records = json.loads(docket_json)
+            writer.writerows(records)
+            new_rows += len(records)
+
+    temporary_file.replace(MERGED_DOCKET_FILE)
+
+    print(f"\nCases replaced: {len(replaced_cases)}")
+    print(f"Old rows retained: {old_rows}")
+    print(f"New full-docket rows: {new_rows}")
+    print(f"Total merged rows: {old_rows + new_rows}")
+    print(f"Merged file: {MERGED_DOCKET_FILE}")
+
+
+# 6. Batch scrapi
 
 def batch_scrape(case_numbers):
-    docket_completed = load_completed_cases(STATUS_FILE)
-    participant_completed = load_completed_cases(PARTICIPANT_STATUS_FILE)
+    conn = open_checkpoint()
 
-    remaining = [
-        case for case in case_numbers
-        if case not in docket_completed or case not in participant_completed
-    ]
+    try:
+        completed = load_completed_cases(conn)
 
-    if MAX_CASES is not None:
-        remaining = remaining[:MAX_CASES]
+        remaining = [
+            case for case in case_numbers
+            if case not in completed
+        ]
 
-    print(f"\nTotal cases: {len(case_numbers)}")
-    print(f"Docket completed: {len(docket_completed)}")
-    print(f"Participants completed: {len(participant_completed)}")
-    print(f"Cases to scrape this run: {len(remaining)}")
+        if MAX_CASES is not None:
+            remaining = remaining[:MAX_CASES]
 
-    with requests.Session() as session:
-        for index, case_number in enumerate(remaining, start=1):
-            print(f"\n[{index}/{len(remaining)}] Scraping {case_number}")
+        print(f"\nTotal cases to fix: {len(case_numbers)}")
+        print(f"Previously fixed: {len(completed)}")
+        print(f"Cases this run: {len(remaining)}")
 
-            try:
-                docket, participants = scrape_case(case_number, session)
-
-                if case_number not in docket_completed:
-                    append_rows(DOCKET_FILE, docket, DOCKET_COLUMNS)
-                    append_rows(STATUS_FILE, [{
-                        "case_number": case_number,
-                        "status": "success",
-                        "activity_count": len(docket),
-                        "error": "",
-                    }], STATUS_COLUMNS)
-                    docket_completed.add(case_number)
-
-                if case_number not in participant_completed:
-                    append_rows(PARTICIPANT_FILE, participants, PARTICIPANT_COLUMNS)
-                    append_rows(PARTICIPANT_STATUS_FILE, [{
-                        "case_number": case_number,
-                        "status": "success",
-                        "participant_count": len(participants),
-                        "error": "",
-                    }], PARTICIPANT_STATUS_COLUMNS)
-                    participant_completed.add(case_number)
-
+        with requests.Session() as session:
+            for index, case_number in enumerate(
+                remaining, start=1
+            ):
                 print(
-                    f"Success: {len(docket)} activities, "
-                    f"{len(participants)} participants"
+                    f"\n[{index}/{len(remaining)}] "
+                    f"Scraping {case_number}"
                 )
 
-            except RuntimeError as error:
-                print(f"Stopped: {error}")
-                break
+                try:
+                    records = scrape_full_docket(
+                        case_number, session
+                    )
 
-            except (requests.RequestException, ValueError) as error:
-                print(f"Failed: {error}")
+                    save_case(conn, case_number, records)
 
-            if index < len(remaining):
-                time.sleep(REQUEST_DELAY)
+                    print(
+                        f"Success: {len(records)} activities"
+                    )
 
+                except RuntimeError as error:
+                    print(f"Stopped: {error}")
+                    break
+
+                except (
+                    requests.RequestException,
+                    ValueError,
+                    TypeError,
+                    KeyError,
+                ) as error:
+                    print(f"Failed: {error}")
+
+                if index < len(remaining):
+                    time.sleep(REQUEST_DELAY)
+
+                if index % 100 == 0:
+                    print(
+                        f"\nProgress: {index}/{len(remaining)}"
+                    )
+
+    finally:
+        print("\nExporting CSV files...")
+        export_full_docket(conn)
+        export_merged_docket(conn)
+        conn.close()
+
+
+# 7. Main
 
 if __name__ == "__main__":
-    cases = load_case_numbers(INPUT_DIR)
-    print(f"\nTotal unique cases: {len(cases)}")
+    cases = load_truncated_cases()
 
     if not cases:
-        print("No cases found. Check the CSV directory.")
+        print("No cases need re-scraping.")
     else:
         batch_scrape(cases)
