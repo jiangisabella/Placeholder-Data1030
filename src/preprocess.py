@@ -21,7 +21,7 @@ import pandas as pd
 
 CSV_DIR = Path("data/raw_csvs")
 PARTICIPANTS_CSV = Path("data/case_participants_raw.csv")   # from src/docket_scraping.py
-DOCKET_CSV = Path("data/docket_activity.csv")
+DOCKET_CSV = Path("data/docket_activity_merged.csv")   # from src/docket_scraping.py, full dockets
 OUT_CSV = Path("data/elections_clean.csv")
 
 # RC = workers/union petition to have a union certified (the question we
@@ -251,14 +251,12 @@ df = df[df["n_unions"] == 1].drop(columns=["n_unions", "has_reason", "union_name
 # features from it are built further down. the docket comes from the live
 # case pages on nlrb.gov, so it's a second record next to the monthly reports
 #
-# heads up: the scraper only read the first page of each docket, which is
-# the 10 newest documents. long (usually contested) cases lose their oldest
-# documents, often the petition. docket_truncated marks those
+# the first scrape only read the first page of each docket (the 10 newest
+# documents). every case that hit 10 was scraped again in full and merged
+# in, so these are complete dockets
 
 docket = pd.read_csv(DOCKET_CSV, dtype=str)
-# count before dropping repeats: a first page of 10 can hold the same document twice
 n_docs = docket.groupby("case_number").size()
-truncated = n_docs[n_docs >= 10].index
 docket = docket.drop_duplicates()
 docket["document"] = docket["document"].str.rstrip("*").str.strip()
 docket["activity_date"] = to_date(docket["activity_date"])
@@ -527,18 +525,17 @@ for col in case_docket.columns.drop(KEY):
 df = df.merge(case_docket, on=KEY, how="left", validate="many_to_one")
 df = df.merge(petition_date, on="case_number", how="left")
 df["has_docket"] = df["case_number"].isin(n_docs.index).astype(int)
-df["docket_truncated"] = df["case_number"].isin(truncated).astype(int)
-# fall back to the report's own file date (FY2012 only) when no petition was found
+# fall back to the report's own file date (early reports only) when no petition was found
 df["petition_date"] = df["petition_date"].fillna(df["file_date"])
 df["days_petition_to_election"] = (df["election_date"] - df["petition_date"]).dt.days
 bad = df["days_petition_to_election"] < 0
 print(f"\npetition after the vote (set to missing): {bad.sum()}")
 df.loc[bad, "days_petition_to_election"] = np.nan
 
-print(f"docket found for {df['has_docket'].sum()} of {len(df)} elections, "
-      f"{df['docket_truncated'].sum()} cut off at 10 documents")
+print(f"docket found for {df['has_docket'].sum()} of {len(df)} elections")
 print(f"petition date found: {df['petition_date'].notna().sum()} "
-      f"(missing in {df.loc[df['docket_truncated'] == 1, 'petition_date'].isna().sum()} of the cut-off cases)")
+      f"(from the docket: {df['case_number'].isin(petition_date.index).sum()}, "
+      f"from the report's file date: {(df['petition_date'].notna() & ~df['case_number'].isin(petition_date.index)).sum()})")
 print(df["days_petition_to_election"].describe().round(1).to_dict())
 
 
@@ -560,7 +557,7 @@ KEEP = [
     # docket
     "petition_date", "days_petition_to_election", "n_docs_before_vote", "pre_hearing",
     "pre_postponed", "pre_ulp_blocking", "pre_request_review", "n_employer_filings_before_vote",
-    "has_docket", "docket_truncated",
+    "has_docket",
     # target
     "union_won",
 ]
@@ -589,13 +586,6 @@ TODO (still to do)
 - The rows the checks flag were looked into in data/data_checks.md, and the
   fixes from there are applied above. Any new fix that needs the vote counts
   has to go before the vote checks cell drops them.
-- Docket: src/docket_scraping.py only reads the first page (10 newest
-  documents). ~1,800 elections are cut off, and since the newest documents
-  are the post-vote ones (objections, Board decisions), the cut-off cases
-  are the contested ones and lose their pre-vote documents and petition
-  date. Re-scraping all docket pages would fix it. Until then don't use
-  docket_truncated as a feature (it partly reflects what happened after
-  the vote), and treat the pre-vote docket counts as lower bounds.
 - employer_law_firm has spelling variants ("Jackson Lewis P.C." vs
   "Jackson Lewis, P.C.", "Ogletree Deakins"); normalize before using it.
 '''

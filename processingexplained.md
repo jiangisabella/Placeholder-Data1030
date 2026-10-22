@@ -10,14 +10,22 @@ This is **`days_petition_to_election`**: election date minus petition date. Fili
 is what opens an RC case, so the petition date and the report's "Case File Date" are the same
 event.
 
-- The petition date comes from the docket (the earliest signed petition) for 13,367 rows. Most
+- The petition date comes from the docket (the earliest signed petition) for 14,453 rows. Most
   reports don't have a file date column, so the docket is the main source.
-- For 211 rows with no petition in the docket, it falls back to the report's file date. Only
+- For 152 rows with no petition in the docket, it falls back to the report's file date. Only
   1,328 rows, all from the early reports, have one.
 - Where both exist, they're the same day 86% of the time and within 3 days 99% of the time, so
   combining them is safe.
-- It's filled in for 13,574 of 15,311 elections. The other 1,737 are missing mostly because the
-  docket scrape was cut off before the petition (see the TODO at the end of the script).
+- It's filled in for 14,601 of 15,312 elections (median 31 days).
+- **707 have no petition date.** Their dockets are complete but never list the petition; the
+  public docket doesn't show every document. They stay missing (`data/data_checks.md`,
+  check 19).
+- **4 more have a petition dated after the vote.** That's a docket upload date, so the gap is
+  set to missing (check 17).
+
+This used to be much worse. The first docket scrape only got the 10 newest documents per case,
+so long, contested cases lost their petition. Those 2,081 cases were re-scraped in full
+(`data/docket_activity_merged.csv`), which added about 1,000 petition dates.
 
 ## What "checks" means
 
@@ -38,8 +46,8 @@ changed:
 | multi-unit / both WON and LOSS rows that contradict their own tally, dropped | 19 | 6 |
 | `eligible` = 0 set to missing | all zeros | 7 |
 | impossible election dates set to missing | 3 | 7 |
-| missing election date filled from the docket tally | 96 | 7 |
-| no election date and no tally, dropped | 27 | 7 |
+| missing election date filled from the docket tally | 97 | 7 |
+| no election date and no tally, dropped | 26 | 7 |
 | petition dated after the vote, gap set to missing | 4 | 10 |
 
 ## The whole process, in order
@@ -91,8 +99,10 @@ The 29 raw columns:
 - Drop 654 elections with 2 or 3 unions on the ballot: **15,357 rows.**
 - **Drop** `n_unions`, `union_name_2`, `union_name_3`.
 
-**Step 5: Load the docket** (`docket_activity.csv`, scraped from the live case pages on
-nlrb.gov)
+**Step 5: Load the docket** (`docket_activity_merged.csv`, scraped from the live case pages
+on nlrb.gov by `src/docket_scraping.py`)
+- These are full dockets. Cases the first scrape cut off at 10 documents were re-scraped in
+  full and merged in.
 - Loaded here because steps 6 and 7 use it. The features from it are built in step 10.
 - Pull out two things per case, used only for checking and never as features (both come
   after the vote):
@@ -115,9 +125,9 @@ nlrb.gov)
 - Print the checks: label vs. vote majority, votes > eligible, no votes, eligible 0 or missing.
 - **Set `eligible` = 0 to missing.** It means "not entered", not a unit of 0.
 - Set the 3 impossible election dates to missing.
-- **Fill 96 missing election dates** from the docket's first Tally of Ballots, usually the day
+- **Fill 97 missing election dates** from the docket's first Tally of Ballots, usually the day
   of the vote.
-- **Drop the 27 rows** with no election date and no tally: **15,311 rows.**
+- **Drop the 26 rows** with no election date and no tally: **15,312 rows.**
 - **Drop** `votes_for`, `votes_against`, `closed_date`, `closed_reason`. These are only known
   after the vote, and `union_won` already holds what's needed from them.
 
@@ -134,20 +144,24 @@ nlrb.gov)
   `petitioner_has_lawyer`, `n_petitioner_lawyers`, `has_intervenor`.
 
 **Step 10: Docket features** (documents filed before the vote only)
-- **Add** 10 columns: `petition_date`, `days_petition_to_election`, `n_docs_before_vote`,
+- **Add** 9 columns: `petition_date`, `days_petition_to_election`, `n_docs_before_vote`,
   `pre_hearing`, `pre_postponed`, `pre_ulp_blocking`, `pre_request_review`,
-  `n_employer_filings_before_vote`, `has_docket`, `docket_truncated`.
+  `n_employer_filings_before_vote`, `has_docket`.
+- `petition_date` is the earliest signed petition in the docket. If the docket has none, it
+  falls back to the report's file date (early reports only).
+- `docket_truncated` was removed. It flagged dockets cut off at 10 documents, and after the
+  full re-scrape none are.
 
 **Step 11: Save**
 - Put the columns in order, check none were missed, sort by election date, and write
   `data/elections_clean.csv`.
 
-**End result: 15,311 rows × 35 columns** (70.8% won).
+**End result: 15,312 rows × 34 columns** (70.8% won).
 
 | | count | columns |
 |---|---|---|
 | kept from raw | 11 | `source_pdf`, `fiscal_year`, `case_number`, `case_name`, `city`, `state`, `union_name`, `method`, `eligible`, `file_date`, `election_date` |
-| added | 24 | `case_type`, `region`, `census_region`, `parent_union`, `employer`, the 8 participant columns, the 10 docket columns, `union_won` |
+| added | 23 | `case_type`, `region`, `census_region`, `parent_union`, `employer`, the 8 participant columns, the 9 docket columns, `union_won` |
 | dropped from raw | 18 | the 9 in step 2, the 2 in step 4, the 3 in step 6, the 4 in step 7 |
 
 Every column except `union_won` is known before the vote.
@@ -161,4 +175,4 @@ Row counts through the pipeline:
 | removing repeats | 16,011 |
 | single-union only | 15,357 |
 | dropping unclear labels | 15,338 |
-| dropping rows with no election date | 15,311 |
+| dropping rows with no election date | 15,312 |

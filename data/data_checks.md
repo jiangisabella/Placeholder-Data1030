@@ -16,8 +16,10 @@ Each suspicious row was traced back through up to five sources:
 2. **Source PDF** (`data/raw_pdfs/`): what the NLRB report actually prints.
 3. **NLRB xlsx** (`data/tmp_website_files/`, FY2020 onward): the same report as a spreadsheet.
 4. **nlrb.gov case page**: the NLRB's current record for the case, including the tally.
-5. **Docket certification** (`data/docket_activity.csv`): whether the case has a
+5. **Docket certification** (`data/docket_activity_merged.csv`): whether the case has a
    *Certification of Representative* (win) or *Certification of Results* (loss) document.
+   These are full dockets. The first scrape only got the 10 newest documents per case, and
+   the 2,081 cases that hit that limit were re-scraped in full and merged in.
 
 These are **two kinds of NLRB record, not five independent sources**:
 
@@ -31,7 +33,7 @@ These are **two kinds of NLRB record, not five independent sources**:
 When the two disagree, it's either a field mis-typed in the report or a correction made after
 the report was published. The docket certification is the strongest single piece of evidence
 because it's the legal document that was actually issued. Where it exists and the report's
-tally agrees with the label, it matches `union_won` for 14,038 of 14,049 rows (99.9%).
+tally agrees with the label, it matches `union_won` for 14,057 of 14,067 rows (99.9%).
 
 ## Summary of decisions
 
@@ -50,16 +52,17 @@ tally agrees with the label, it matches `union_won` for 14,038 of 14,049 rows (9
 | 10 | No valid votes (0–0) | 48 | tally never entered | **keep** |
 | 11 | Eligible = 0 or missing | 85 | NLRB records "not entered" as 0 | **set 0 to missing**, keep rows |
 | 12 | Election date after case closed | 3 | date typos | already set to missing, see 13 |
-| 13 | No election date | 123 | blank in the PDF | **fill from docket tally date** (96), **drop** the rest (27) |
+| 13 | No election date | 123 | blank in the PDF | **fill from docket tally date** (97), **drop** the rest (26) |
 | 14 | Closed > 1 year after the vote | 185 | real litigation (objections, Board review) | **keep** |
 | 15 | State with no census region | 0 | none | nothing to do |
 | 16 | No participants / no docket | 4 | not found by the scraper | **keep**, features stay missing |
 | 17 | Petition dated after the vote | 4 | docket upload date, not filing date | already set to missing |
-| 18 | Petition → election > 1 year | 43 | old blocked cases (petitions from 2002–2009) | **keep** |
+| 18 | Petition → election > 1 year | 113 | litigated or blocked cases | **keep** |
+| 19 | No petition date | 707 | the public docket doesn't list the petition | **keep**, feature stays missing |
 
-**Status: all recommendations are applied in `src/preprocess.py`.** 46 rows dropped
-(19 + 27), 33 labels corrected (19 to won, 14 to lost), every `eligible` of 0 set to missing,
-and 96 election dates filled. `data/elections_clean.csv` now has **15,311 rows × 35 columns**.
+**Status: all recommendations are applied in `src/preprocess.py`.** 45 rows dropped
+(19 + 26), 33 labels corrected (19 to won, 14 to lost), every `eligible` of 0 set to missing,
+and 97 election dates filled. `data/elections_clean.csv` now has **15,312 rows × 34 columns**.
 The script prints each of these counts when it runs.
 
 The numbers in the sections below are from **before** these fixes (15,357 rows), so they
@@ -173,7 +176,7 @@ say loss:
 | 01-RC-061968 | 6–14 | Representative | LOSS | Results |
 | 31-RC-087528 | 34–33 | Representative | LOSS | Results |
 
-**Decision:** **set `union_won` to the docket's value** for these 33. The other 10 rows where
+**Decision:** **set `union_won` to the docket's value** for these 33. The other 9 rows where
 the docket disagrees with the label have no second source backing the docket, so the label
 stays.
 
@@ -195,13 +198,13 @@ Representative".
 
 A case counts as multi-unit if the reports list it with different counts on the same election
 date, or the docket has **both** a Certification of Representative and a Certification of
-Results. That's 88 rows. 18 of them contradict their own tally; the label probably belongs to
+Results. That's 90 rows. 18 of them contradict their own tally; the label probably belongs to
 another unit.
 
 One more "both" row, **32-RC-297724** (3–11 tally, closed Representative, no docket), can't be
 settled either way.
 
-**Decision:** **drop these 19.** Keep the other 70 multi-unit rows, where the case-level label
+**Decision:** **drop these 19.** Keep the other 72 multi-unit rows, where the case-level label
 and the unit's own tally agree.
 
 Note on the "both" rows: I first read all 34 "both" rows that contradict their tally as
@@ -329,19 +332,19 @@ for the pre-vote docket features and for `days_petition_to_election`.
 in a few reports (9 in `FY2020/july-2020-pdf.pdf`). They all have vote counts, so the
 election happened.
 
-**Investigation:** the docket has a *Tally of Ballots* document for 96 of them. The tally date
+**Investigation:** the docket has a *Tally of Ballots* document for 97 of them. The tally date
 is a good stand-in for the election date: across all elections with one tally, the median gap
-is 0 days and 73% are within a week (mail-ballot elections are counted later).
+is 0 days and 74% are within a week (mail-ballot elections are counted later).
 
-**Decision:** **fill the election date from the earliest Tally of Ballots** (96 rows) and
-**drop the remaining 27.** Those can't be placed in time or given docket features.
+**Decision:** **fill the election date from the earliest Tally of Ballots** (97 rows) and
+**drop the remaining 26.** Those can't be placed in time or given docket features.
 
 ## 14. Closed more than a year after the vote
 
 **What it checks:** cases where closing took over a year (median 533 days, max 4,075).
 
-**Result:** 185 rows. Their dockets are full of litigation: Board decisions (136 documents),
-objections (73), requests for review (60+), hearing officer reports, and "Answer to
+**Result:** 185 rows. Their dockets are full of litigation: Board decisions (178 documents),
+objections (171), requests for review (148), hearing officer reports, and "Answer to
 Complaint". That last one usually means the employer refused to bargain to test the
 certification in court. These are real contested cases, not errors. Their win rate is lower
 (63.8% vs 70.8% overall).
@@ -379,22 +382,49 @@ petition was filed.
 ## 18. Very long petition → election gaps
 
 **What it checks:** not a printed check, but `days_petition_to_election` has a long tail
-(median 30 days, max 3,401).
+(median 31 days, max 3,444).
 
-**Result:** 43 elections took more than a year. The longest are old cases with pre-2011 case
-numbers (e.g. 15-RC-008394: petition 2002, election 2011) that were blocked or stalled for
-years. Hearings (21% vs 7%) and requests for review (12%) are more common in this group.
+**Result:** 113 elections took more than a year. That's up from 43 before the full docket
+re-scrape: these long, contested cases are exactly the ones whose petition used to be cut off.
+Most were litigated before the vote. 59% had a hearing (vs 9% overall), 32% a request for
+review (vs 2%), and 12% a blocking unfair-labor-practice charge (vs 1%). Examples:
+
+- **13-RC-069379**: petition 2011, election 2021.
+- **15-RC-008394**: petition 2002, election 2011, an old case from before the 2011 numbering.
+
+A rerun election in the same case is also measured from the original petition (12-RC-073852:
+petition 2012, second election 2019).
 
 **Decision:** **keep.** They're real. If the model is sensitive to outliers (e.g. linear
 models), handle it in feature engineering (cap or log), not by dropping rows.
+
+## 19. No petition date
+
+**What it checks:** elections with no petition date, so `days_petition_to_election` is missing.
+The script prints how many petition dates it found and where each came from.
+
+**Result:** 14,605 of 15,312 have one: 14,453 from the docket, 152 from the report's file date
+(early reports only). Where both exist, they're the same day 86% of the time and within 3 days
+99%.
+
+The other **707** all have a docket, and it's complete (none hit the old 10-document limit),
+but it never lists a petition. These dockets are short (median 4 documents), and the earliest
+is usually the Stipulated Election Agreement, a median 19 days before the vote. The NLRB's
+public docket doesn't list every document, so re-scraping can't recover these. They're spread
+across all years.
+
+**Decision:** **keep, with `petition_date` and `days_petition_to_election` missing.** Don't
+substitute the earliest document's date. It's a different, later event, and would make
+these elections look faster than they were. Handle the missing values in the modeling
+pipeline.
 
 ---
 
 ## Takeaways for the report
 
 - **The label is trustworthy, the vote counts aren't.** `union_won` (from the closed reason)
-  agrees with the docket certification for 14,217 of the 14,260 elections that have exactly one
-  kind of certification (99.7%). 33 of the 43 disagreements are wrong closed reasons that the
+  agrees with the docket certification for 14,236 of the 14,278 elections that have exactly one
+  kind of certification (99.7%). 33 of the 42 disagreements are wrong closed reasons that the
   rule in 7a fixes. The vote counts, and sometimes `eligible`, have typos in the NLRB's own
   records. Some are confirmed on nlrb.gov, and some are clustered in particular regional
   offices. That supports labelling from the case closing rather than the tally, and not using
