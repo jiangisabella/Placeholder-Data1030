@@ -140,18 +140,14 @@ def load_year(fy_dir):
     print(f"{fy_dir.name}: {len(frames)} reports, {len(df)} rows")
     return df
 
-
-# %%
 years = [load_year(d) for d in sorted(CSV_DIR.glob("FY*"))]
 raw = pd.concat(years, ignore_index=True)
 print(f"\nmerged: {raw.shape}")
-
+# %%
 
 #Keeping RC type cases only
 
 df = raw.copy()
-#region from case number (ex: 01-RC-216927)
-df["region"] = df["case_number"].str[:2]
 
 # RC = workers/union petition to have a union certified
 print(f"case types: {df['case_type'].value_counts().to_dict()}, keeping RC")
@@ -159,7 +155,7 @@ df = df[df["case_type"] == "RC"].copy()
 
 """
 Dropping columns:
-- region_offices (same as the first 2 digits of case number)
+- region_offices (NLRB office codes, not used)
 - case id, internal data, unusable
 - columns known only after vote ends like union_to_certify
 """
@@ -626,7 +622,7 @@ except the target
 """
 KEEP = [
     # ids / bookkeeping
-    "fiscal_year", "case_number", "case_type", "region",
+    "fiscal_year", "case_number", "case_type",
     # from the reports
     "case_name", "employer", "city", "state", "census_region",
     "union_name", "parent_union", "eligible", "file_date", "election_date",

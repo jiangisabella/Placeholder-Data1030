@@ -66,7 +66,7 @@ tally agrees with the label, it matches `union_won` for 14,057 of 14,067 rows (9
 **Status: all recommendations are applied in `src/preprocessmanual.py`.** 45 rows dropped
 (19 + 26), 33 labels corrected (19 to won, 14 to lost), `eligible` set to missing where it's 0
 or smaller than the votes cast (157 missing in the final data), and 97 election dates filled.
-`data/elections_clean.csv` now has **15,312 rows × 24 columns**. The script prints each of
+`data/elections_clean.csv` now has **15,312 rows × 23 columns**. The script prints each of
 these counts when it runs.
 
 The numbers in the sections below are from **before** these fixes (15,357 rows), so they
@@ -89,8 +89,7 @@ counts) that isn't a number, or any date that doesn't parse as `m/d/yyyy`.
 reports also have a separate "Case Type" column. The check counts rows where the two disagree.
 
 **Result:** 0, and the "Case Type" column is filled in on all 18,995 raw rows. So
-`case_type` is now taken straight from that column, and the check was removed. `region` still
-comes from the first two digits of the case number.
+`case_type` is now taken straight from that column, and the check was removed.
 
 ## 3. Exact repeats
 

@@ -92,7 +92,6 @@ The 22 raw columns:
 **Step 2: Keep RC cases only**
 - `case_type` comes straight from the report's "Case Type" column. It's filled in on every row
   and always matches the case number.
-- **Add** `region` (e.g. 01), the first two digits of `case_number` (`01-RC-216927`).
 - Keep RC only: **16,123 rows**. RD, RM and UD cases ask a different question.
 - **Drop** 4 raw columns nothing later uses: `page`, `region_offices`, `case_id`, and
   `union_to_certify` (that one is only known after the vote).
@@ -175,12 +174,12 @@ on nlrb.gov by `src/docket_scraping.py`)
 - Put the columns in order, check none were missed, sort by election date, and write
   `data/elections_clean.csv`.
 
-**End result: 15,312 rows × 24 columns** (70.8% won).
+**End result: 15,312 rows × 23 columns** (70.8% won).
 
 | | count | columns |
 |---|---|---|
 | kept from raw | 10 | `fiscal_year`, `case_number`, `case_type`, `case_name`, `city`, `state`, `union_name`, `eligible`, `file_date`, `election_date` |
-| added | 14 | `region`, `census_region`, `parent_union`, `employer`, the 7 participant columns, `petition_date`, `days_petition_to_election`, `union_won` |
+| added | 13 | `census_region`, `parent_union`, `employer`, the 7 participant columns, `petition_date`, `days_petition_to_election`, `union_won` |
 | dropped from raw | 12 | the 4 in step 2, the 2 in step 4, the 2 in step 6, the 4 in step 7 |
 
 Every column except `union_won` is known before the vote. Before modeling, take out the
