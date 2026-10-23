@@ -58,10 +58,8 @@ HEADERS = {
     "Labor Org 2 Name": "union_name_2",
     "Labor Org 3 Name": "union_name_3",
     "Labor Org3": "union_name_3",
-    "Stipulated / Consent / Directed": "method",
-    "Stiplulated / Consent / Directed": "method",
-    "Union (Win / Loss)": "reported_win_loss",
-    "Union (Won / Loss)": "reported_win_loss",
+    "Union (Win / Loss)": "reported_win",
+    "Union (Won / Loss)": "reported_win",
     "Cert of Rep (Win)": "reported_win",
     "Certification of Representative Date (Win)": "reported_win",
     "Cerification of Representative Date (Win)": "reported_win",
@@ -80,10 +78,14 @@ columns dropped as soon as a report is read:
  - an empty spacer column in two 2025/2026 reports
  - the proposition votes, only filled in for UD (deauthorization) cases
  - votes for unions 2 and 3, multi-union elections are dropped anyway
+ - election method (stipulated / consent / directed), not used
+ - source_pdf, only needed to skip the DROP_FILES reports
 """
 DROP_COLUMNS = ["Cert Rep Win Count", "% Won by Union", "Unnamed: 20", "extraction_method",
                 "For Proposition", "For Propostion", "Against Proposition",
-                "Votes for Labor Org 2", "Votes for Labor Org 3", "Votes For Labor Org3"]
+                "Votes for Labor Org 2", "Votes for Labor Org 3", "Votes For Labor Org3",
+                "Stipulated / Consent / Directed", "Stiplulated / Consent / Directed",
+                "source_pdf"]
 
 NUMBER_COLS = ["eligible", "votes_against", "votes_for"]
 DATE_COLS = ["file_date", "election_date", "closed_date"]
@@ -113,7 +115,7 @@ def load_year(fy_dir):
             continue
         df = df.drop(columns=DROP_COLUMNS, errors="ignore")
         #stop if a report has a header we haven't seen before
-        unknown = set(df.columns) - set(HEADERS) - {"source_pdf", "page"}
+        unknown = set(df.columns) - set(HEADERS) - {"page"}
         if unknown:
             raise ValueError(f"{f}: no rename for {sorted(unknown)}")
         frames.append(df.rename(columns=HEADERS))
@@ -207,9 +209,7 @@ Or the copy that has the closed reason/outcome specified.
 df["has_reason"] = df["closed_reason"] != ""
 df = df.sort_values(["has_reason", "closed_date"], na_position="first")
 dup = df.duplicated(VOTE_KEY, keep="last")
-same_file = df.duplicated(VOTE_KEY + ["source_pdf"], keep="last")
-print(f"exact repeats dropped: {dup.sum()} ({same_file.sum()} within one report, "
-      f"{(dup & ~same_file).sum()} across reports)")
+print(f"exact repeats dropped: {dup.sum()}")
 df = df[~dup].copy()
 
 
@@ -230,64 +230,109 @@ df = df[df["n_unions"] == 1].drop(columns=["n_unions", "has_reason", "union_name
 # %%
 """
 Loading the docket activity data.
-loaded here because the target and election date fixes below use it, the
-features from it are built further down. 
+The docket is the list of documents filed in each case, scraped from the
+case pages on nlrb.gov (src/docket_scraping.py). One row per document.
+
+Columns:
+- case_number: joins to the election rows
+- activity_date: when the document was filed or issued
+- document: what it is (e.g. "Tally of Ballots", "Certification of Results")
+- issued_filed_by: who filed it (Employer, Petitioner, NLRB - GC, ...)
+
+Cleaning:
+- exact duplicate rows dropped
+- the "*" nlrb.gov puts after some document names is stripped.
+- activity_date turned into a datetime
+
+Needed to cover missing data. It has the certification, and date of first tally.
+Further down it also gives the petition date.
 """
 
 docket = pd.read_csv(DOCKET_CSV, dtype=str)
-n_docs = docket.groupby("case_number").size()
 docket = docket.drop_duplicates()
 docket["document"] = docket["document"].str.rstrip("*").str.strip()
 docket["activity_date"] = pd.to_datetime(docket["activity_date"], format="%m/%d/%Y", errors="coerce")
 
 """
-the certification the case got and its first tally of ballots. both come
-after the vote, so they only check the target and fill missing election
-dates, they're never features. docket_cert: 1 = Representative,
-0 = Results, -1 = neither or both
+Collecting data related to the target variable, union_won
+the certification the case got and its first tally of ballots.
+(usually the election close date. ballots are counted when election is closed.) 
+Used to fill in for missing election dates from the monthly data.
+docket_cert: 
+1 = Representative,
+0 = Results,
+-1 = neither or both
 """
 doc = docket["document"].fillna("")
-certs = pd.DataFrame({
-    "case_number": docket["case_number"],
-    "rep": doc.str.contains("Certification of Representative"),
-    "res": doc.str.contains("Certification of Results"),
-}).groupby("case_number")[["rep", "res"]].any()
-docket_both = certs["rep"] & certs["res"]
-docket_cert = pd.Series(np.select([certs["rep"] & ~certs["res"], certs["res"] & ~certs["rep"]], [1, 0], -1),
-                        index=certs.index)
-first_tally = docket[doc.str.contains("Tally of Ballots")].groupby("case_number")["activity_date"].min()
+
+# case numbers that have each kind of certification in their docket
+rep_cases = set(docket.loc[doc.str.contains("Certification of Representative"), "case_number"])
+res_cases = set(docket.loc[doc.str.contains("Certification of Results"), "case_number"])
+both_cases = rep_cases & res_cases
+
+# case number -> 1 or 0. cases with both or neither are left out (-1 later)
+docket_cert = {}
+for case in rep_cases - res_cases:
+    docket_cert[case] = 1
+for case in res_cases - rep_cases:
+    docket_cert[case] = 0
+
+# date of the first Tally of Ballots in each case
+tallies = docket[doc.str.contains("Tally of Ballots")]
+first_tally = tallies.groupby("case_number")["activity_date"].min()
 
 
 # %%
 """
----------- target ----------
+One column for target variable: union_won
 union_won = 1 if the case closed with a Certification of Representative,
-0 if Certification of Results. two FY2012 reports (Nov 2011, Mar 2012) have
-no closed reason column, so those fall back to the report's own WON/LOSS column
+0 if Certification of Results. 
+two FY2012 reports (Nov 2011, Mar 2012) have no closed reason column, so those fall back to the report's own WON/LOSS column
 """
 
+#union_won from closed_reason 
 reason = df["closed_reason"].str.lower()
-df["union_won"] = np.select(
-    [reason.str.contains("representative"), reason.str.contains("results")],
-    [1, 0], default=-1)
+is_rep = reason.str.contains("representative")
+is_res = reason.str.contains("results")
 
-won_col = df["reported_win_loss"].eq("WON") | df["reported_win"].eq("WON")
-lost_col = df["reported_win_loss"].eq("LOSS") | df["reported_loss"].eq("LOSS")
-df["reported_result"] = np.select(
-    [won_col & lost_col, won_col, lost_col], ["both", "won", "lost"], default="")
-fallback = (df["union_won"] == -1) & df["reported_result"].isin(["won", "lost"])
-df.loc[fallback, "union_won"] = (df.loc[fallback, "reported_result"] == "won").astype(int)
-print(f"target taken from WON/LOSS column instead of closed reason: {fallback.sum()}")
+df["union_won"] = -1                  # -1 = unknown for now
+df.loc[is_res, "union_won"] = 0       # Certification of Results = union lost
+df.loc[is_rep, "union_won"] = 1       # Certification of Representative = union won
 
-print(f"no target at all (dropped): {(df['union_won'] == -1).sum()}")
-df = df[df["union_won"] != -1].copy()
+#union_won from won/loss columns
+# FY2012 / early FY2013 reports have one column with WON or LOSS (renamed to
+# reported_win), later reports put WON in reported_win and LOSS in reported_loss
+won_col = df["reported_win"] == "WON"
+lost_col = (df["reported_win"] == "LOSS") | (df["reported_loss"] == "LOSS")
+
+df["reported_result"] = ""
+df.loc[lost_col, "reported_result"] = "lost"
+df.loc[won_col, "reported_result"] = "won"
+df.loc[won_col & lost_col, "reported_result"] = "both"
+
+#if closed reason is missing, using the result from the won/loss cols
+no_reason = df["union_won"] == -1
+fill_won = no_reason & (df["reported_result"] == "won")
+fill_lost = no_reason & (df["reported_result"] == "lost")
+df.loc[fill_won, "union_won"] = 1
+df.loc[fill_lost, "union_won"] = 0
+print(f"target taken from WON/LOSS column instead of closed reason: {fill_won.sum() + fill_lost.sum()}")
+
+#dropping rows with missing data
+no_target = df["union_won"] == -1
+print(f"no target at all (dropped): {no_target.sum()}")
+df = df[~no_target].copy()
 
 print("\nunion_won vs the report's WON/LOSS columns:")
 print(pd.crosstab(df["union_won"], df["reported_result"]))
 
 """
-checking the target against the docket (data/data_checks.md, check 7).
-the report's own tally and WON/LOSS column are the second opinion
+checking the target against the docket.
+the report's own tally and WON/LOSS column are the second opinion.
+all three are put on the same 1 / 0 scale as union_won:
+- cert: the docket's certification (-1 = none or both)
+- majority_for: 1 if the union got more votes (a tie is a loss)
+- reported: the WON/LOSS column (NaN if it's blank or both)
 """
 cert = df["case_number"].map(docket_cert).fillna(-1)
 majority_for = (df["votes_for"] > df["votes_against"]).astype(int)
@@ -300,78 +345,97 @@ outcome on every unit's row, so a unit that lost can say won
 (22-RC-153083: 5-3 and 4-12, both "Representative"). spotted by different
 counts for one case + date, or a docket with both kinds of certification
 """
-multi_unit = (df["n_units"] > 1) | df["case_number"].map(docket_both).fillna(False).astype(bool)
+multi_unit = (df["n_units"] > 1) | df["case_number"].isin(both_cases)
 
 """
+Tracking rows where report label is wrong and docket label is more accurate.
 the report's closed reason is wrong when the docket disagrees and the
 tally or WON/LOSS column on the same row agrees with the docket
 (31-RC-140133: 32-15 vote, report says Results, docket has a
 Certification of Representative on the closing date)
 """
-fix = (cert != -1) & (cert != df["union_won"]) & ((majority_for == cert) | (reported == cert)) & ~multi_unit
+has_cert = cert != -1
+docket_disagrees = cert != df["union_won"]
+votes_agree_with_docket = (majority_for == cert)
+report_agrees_with_docket = (reported == cert)
+
+fix = has_cert & docket_disagrees & (votes_agree_with_docket | report_agrees_with_docket) & ~multi_unit
 
 """
 a unit whose label contradicts its own tally can't be sorted out, and
-neither can a row marked both WON and LOSS that the docket doesn't settle
+neither can a row marked both WON and LOSS that the docket doesn't settle.
 """
-unclear = (multi_unit | (df["reported_result"] == "both")) & (df["union_won"] != majority_for) & ~fix
+marked_both = df["reported_result"] == "both"
+label_disagrees_with_votes = (df["union_won"] != majority_for)
 
-df.loc[fix, "union_won"] = cert[fix].astype(int)
+unclear = (multi_unit | marked_both) & label_disagrees_with_votes & ~fix
+
+# apply the docket fix
+fix_to_won = fix & (cert == 1)
+fix_to_lost = fix & (cert == 0)
+df.loc[fix_to_won, "union_won"] = 1
+df.loc[fix_to_lost, "union_won"] = 0
 print(f"\nlabel corrected from the docket: {fix.sum()} "
-      f"({(cert[fix] == 1).sum()} to won, {(cert[fix] == 0).sum()} to lost)")
+      f"({fix_to_won.sum()} to won, {fix_to_lost.sum()} to lost)")
+
+# drop the unclear rows, and the helper columns that are no longer needed
 print(f"multi-unit or both WON and LOSS, label contradicts its own tally (dropped): {unclear.sum()}")
-df = df[~unclear].drop(columns=["reported_win_loss", "reported_win", "reported_loss", "reported_result", "n_units"])
+df = df[~unclear].copy()
+df = df.drop(columns=["reported_win", "reported_loss", "reported_result", "n_units"])
 
 
 # %%
 """
----------- vote checks, then drop what's only known after the vote ----------
-printed only, nothing is kept as a column
+Sanity checks for votes
 """
 
 # sanity check against the vote counts (tie = loss)
-majority_for = (df["votes_for"] > df["votes_against"]).astype(int).rename("majority_for")
+majority_for = (df["votes_for"] > df["votes_against"]).astype(int)
 print("\nunion_won vs majority of votes:")
-print(pd.crosstab(df["union_won"], majority_for))
+print(pd.crosstab(df["union_won"], majority_for, colnames=["majority_for"]))
 
 """
-the PDFs really do have some of these (e.g. 2 eligible, 57 votes in Apr 2012).
-the label is fine on these rows, and the counts are dropped below
+Checking if theres more votes than eligible voters
 """
 total_votes = df["votes_for"] + df["votes_against"]
-print(f"\nmore votes than eligible voters: {(total_votes > df['eligible']).sum()}")
-print(f"no valid votes: {(total_votes == 0).sum()}")
-print(f"eligible == 0 or missing: {((df['eligible'] == 0) | df['eligible'].isna()).sum()}")
+too_many_votes = (total_votes > df["eligible"])
+no_votes = (total_votes == 0)
+no_eligible = (df["eligible"] == 0) | df["eligible"].isna()
+print(f"\nmore votes than eligible voters: {too_many_votes.sum()}")
+print(f"no valid votes: {no_votes.sum()}")
+print(f"eligible == 0 or missing: {no_eligible.sum()}")
 
 """
-an eligible count of 0 means it wasn't entered (12-RC-197840 shows 0
-eligible next to 231 ballots, on nlrb.gov too), so it's missing, not a
-tiny unit. filling it in is left to the model pipeline
+if eligible votes = 0, treated as missing data.
+same if there are more votes than eligible voters, the eligible count
+is wrong, and eligible is kept as a feature
 """
 df.loc[df["eligible"] == 0, "eligible"] = np.nan
+df.loc[too_many_votes, "eligible"] = np.nan
 
 """
 an election can't happen after its case closed. these are typos in the
-PDF (one has 05/08/2102), so treat them as missing
+PDF (one has 05/08/2102), so treat them as missing dates, corrected by docket data
 """
-bad = df["election_date"] > df["closed_date"]
-print(f"\nelection date after the case closed (set to missing): {bad.sum()} "
-      f"{df.loc[bad, 'election_date'].dt.date.tolist()}")
-df.loc[bad, "election_date"] = pd.NaT
+after_close = df["election_date"] > df["closed_date"]
+bad_dates = df.loc[after_close, "election_date"].dt.date.tolist()
+print(f"\nelection date after the case closed (set to missing): {after_close.sum()} {bad_dates}")
+df.loc[after_close, "election_date"] = pd.NaT
 
 """
 missing election dates (mostly blank in the PDF): use the first Tally of
 Ballots in the docket, which for most elections is the day of the vote
 (median 0 days). rows with no tally can't be placed in time, so dropped
 """
+no_date = df["election_date"].isna()
 tally = df["case_number"].map(first_tally)
-fill = df["election_date"].isna() & tally.notna()
+fill = no_date & tally.notna()
 df.loc[fill, "election_date"] = tally[fill]
-print(f"no election date: {fill.sum() + df['election_date'].isna().sum()}, filled from the docket "
-      f"tally: {fill.sum()}, no tally (dropped): {df['election_date'].isna().sum()}")
-df = df[df["election_date"].notna()].copy()
-closed_late = (df["closed_date"] - df["election_date"]).dt.days > 365
-print(f"closed more than a year after the vote: {closed_late.sum()}")
+
+still_no_date = df["election_date"].isna()
+print(f"no election date: {no_date.sum()}, filled from the docket tally: {fill.sum()}, "
+      f"no tally (dropped): {still_no_date.sum()}")
+df = df[~still_no_date].copy()
 
 """
 the vote counts and how the case closed come after the vote, and
@@ -380,8 +444,12 @@ union_won already holds what we need from them
 df = df.drop(columns=["votes_for", "votes_against", "closed_date", "closed_reason"])
 
 
-# %%
-# ---------- features ----------
+""" 
+Adding new features 
+- census_region: state is mapped to regions
+- parent_union: union name is matched to its parent
+- employer : case_name  cleaned
+"""
 
 CENSUS_REGION = {}
 for region, states in {
@@ -399,7 +467,7 @@ df["census_region"] = df["state"].map(CENSUS_REGION).fillna("Unknown")
 print(f"\nstates with no census region: {df.loc[df['census_region'] == 'Unknown', 'state'].value_counts().to_dict()}")
 
 """
-parent union by keyword. first match wins, so the order matters
+parent union by keyword.
 (Workers United is SEIU-affiliated but kept on its own)
 """
 PARENT_UNION = [
@@ -429,8 +497,8 @@ for name, pattern in reversed(PARENT_UNION):   # reversed so the first match is 
 print(f"\n{df['parent_union'].value_counts().to_dict()}")
 
 """
-employer name for grouping (GroupKFold): lowercase, nothing after d/b/a,
-no punctuation, no inc/llc/corp
+employer name for grouping: 
+lowercase, nothing after d/b/a, no punctuation, no inc/llc/corp
 """
 SUFFIXES = r"\b(inc|incorporated|llc|l l c|corp|corporation|co|company|ltd|lp|llp|pc|pllc|the)\b"
 emp = df["case_name"].str.lower()
@@ -441,139 +509,142 @@ df["employer"] = emp.str.split().str.join(" ")
 
 # %%
 """
----------- case participants (one row per case) ----------
-each row of participant_raw_text is one party, split over lines:
-  party \\n type \\n name \\n organization
-  e.g. "Employer\\nLegal Representative\\nBLOOM, HOWARD\\nJackson Lewis, P.C."
-some rows are shorter ("Employer\\nEmployer\\nDELTA PROJECTS, INC.")
-the case pages show who is on the case now, so a lawyer added late (for
-objections, say) shows up too. mostly these are known before the vote
+Case participants data.
+The people and organizations listed on each case, scraped from the case
+pages on nlrb.gov (src/docket_scraping.py). One row per participant.
+
+Columns:
+- case_number: joins to the election rows
+- participant_raw_text: everything about the participant in one string,
+  split over lines:
+    party \\n type \\n name \\n organization
+    e.g. "Employer\\nLegal Representative\\nBLOOM, HOWARD\\nJackson Lewis, P.C."
+  some rows are shorter ("Employer\\nEmployer\\nDELTA PROJECTS, INC.")
+
+Cleaning:
+- exact duplicate rows dropped
+- participant_raw_text split into its lines:
+  - party: which side they're on (Employer, Petitioner, Intervenor, ...)
+  - ptype: their role (Legal Representative, Union, Employer, ...)
+  - org: their organization (4th line), e.g. the lawyer's law firm
+
+Making (one row per case, then merged onto the elections):
+- n_participants: how many participants the case has
+- n_employer_lawyers / employer_has_lawyer: lawyers on the employer's side
+- n_petitioner_lawyers / petitioner_has_lawyer: lawyers on the union's side
+- employer_law_firms: every firm the employer's lawyers come from,
+  separated by "; " (split it back into a list with .str.split("; "))
+- has_intervenor: 1 if another party (e.g. a second union) joined the case
+
 """
 
 parts = pd.read_csv(PARTICIPANTS_CSV, dtype=str).drop_duplicates()
+
+# split the raw text into its lines (a missing line becomes "")
 lines = parts["participant_raw_text"].fillna("").str.split("\n")
-n_lines = lines.str.len()
 parts["party"] = lines.str[0]
-# 2-line rows are either "Petitioner\nIndividual" or a party plus a name
-PTYPES = ["Legal Representative", "Union", "Employer", "Additional Service",
-          "Individual", "Notification", "Union as an Employer"]
-parts["ptype"] = lines.str[1].where(lines.str[1].isin(PTYPES), "")
-parts["org"] = np.where(n_lines >= 4, lines.str[3], "").astype(str)
+parts["ptype"] = lines.str[1].fillna("")
+parts["org"] = lines.str[3].fillna("")
 
-# big management-side labor law firms (starting list, add more)
-MGMT_FIRMS = (r"jackson lewis|littler|ogletree|seyfarth|fisher (?:&|and )?phillips|"
-              r"morgan,? lewis|proskauer|constangy|ford ?harrison|epstein becker|"
-              r"baker ?hostetler|barnes (?:&|and) thornburg|polsinelli")
-
+# flags for each participant row
 is_lawyer = parts["ptype"] == "Legal Representative"
-emp_lawyer = is_lawyer & (parts["party"] == "Employer")
-pet_lawyer = is_lawyer & (parts["party"] == "Petitioner")
-parts["emp_lawyer"] = emp_lawyer
-parts["pet_lawyer"] = pet_lawyer
-parts["emp_mgmt_firm"] = emp_lawyer & parts["org"].str.lower().str.contains(MGMT_FIRMS, regex=True)
+parts["emp_lawyer"] = is_lawyer & (parts["party"] == "Employer")
+parts["pet_lawyer"] = is_lawyer & (parts["party"] == "Petitioner")
 parts["intervenor"] = parts["party"] == "Intervenor"
-parts["emp_firm"] = parts["org"].where(emp_lawyer, "")
 
+# the employer lawyer's firm, blank for everyone else
+parts["emp_firm"] = ""
+parts.loc[parts["emp_lawyer"], "emp_firm"] = parts["org"]
+
+def list_firms(firms):
+    # every firm the employer's lawyers come from, joined with "; " since
+    # firm names have commas in them ("" = no lawyer listed)
+    firms = sorted(set(firms[firms != ""]))
+    return "; ".join(firms)
+
+
+# one row per case
 by_case = parts.groupby("case_number")
-case_parts = pd.DataFrame({
-    "n_participants": by_case.size(),
-    "n_employer_lawyers": by_case["emp_lawyer"].sum(),
-    "n_petitioner_lawyers": by_case["pet_lawyer"].sum(),
-    "employer_mgmt_firm": by_case["emp_mgmt_firm"].any().astype(int),
-    "has_intervenor": by_case["intervenor"].any().astype(int),
-    # the firm most of the employer's lawyers come from ("" = no lawyer listed)
-    "employer_law_firm": by_case["emp_firm"].agg(lambda s: s[s != ""].mode().iloc[0] if (s != "").any() else ""),
-}).reset_index()
+case_parts = pd.DataFrame()
+case_parts["n_participants"] = by_case.size()
+case_parts["n_employer_lawyers"] = by_case["emp_lawyer"].sum()
+case_parts["n_petitioner_lawyers"] = by_case["pet_lawyer"].sum()
+case_parts["has_intervenor"] = by_case["intervenor"].any().astype(int)
+case_parts["employer_law_firms"] = by_case["emp_firm"].apply(list_firms)
 case_parts["employer_has_lawyer"] = (case_parts["n_employer_lawyers"] > 0).astype(int)
 case_parts["petitioner_has_lawyer"] = (case_parts["n_petitioner_lawyers"] > 0).astype(int)
+case_parts = case_parts.reset_index()
 
+# add the case features onto every election of that case
 df = df.merge(case_parts, on="case_number", how="left", validate="many_to_one")
 print(f"\nparticipants found for {df['n_participants'].notna().sum()} of {len(df)} elections")
-print(df[["employer_has_lawyer", "employer_mgmt_firm", "petitioner_has_lawyer",
+print(df[["employer_has_lawyer", "petitioner_has_lawyer",
           "has_intervenor"]].mean().round(3).to_dict())
 
 
-# %%
+
 """
----------- docket activity (one row per case + election date) ----------
-the documents filed in each case. only what was filed BEFORE the vote can
-be a feature; tallies, certifications and objections come after it.
-grouped by case + election date since a rerun election keeps the same
-case number. (the docket itself is loaded above the target cell)
+Petition date from the docket.
+The only docket feature for now.
+
+Steps:
+- petition date: the earliest signed petition (amended or not) in each case
+- if the docket has no petition, use the report's own file date instead
+- days_petition_to_election: how many days from the petition to the vote
+  (a petition after the vote is a bad date, set to missing)
 """
 
 # petition date = earliest signed petition (amended or not)
 is_petition = docket["document"].str.match(r"Signed (?:Amended )?R[CDM] Petition")
-petition_date = docket[is_petition].groupby("case_number")["activity_date"].min().rename("petition_date")
+petitions = docket[is_petition]
+petition_date = petitions.groupby("case_number")["activity_date"].min()
+petition_date = petition_date.rename("petition_date")
 
-# match each document to the elections in its case, keep the ones filed before the vote
-elections = df[["case_number", "election_date"]].drop_duplicates().dropna()
-docs = docket.merge(elections, on="case_number")
-before = docs[docs["activity_date"] < docs["election_date"]].copy()
-
-doc = before["document"].str.lower()
-before["hearing"] = doc.str.contains(r"hearing officer|post-hearing brief|pre-hearing brief|decision and direction")
-before["postponed"] = doc.str.contains(r"reschedule hearing|postpone")
-before["blocking"] = doc.str.contains(r"ulp|blocking|request to proceed")
-before["review"] = doc.str.contains(r"request for review|rfr ")
-before["by_employer"] = before["issued_filed_by"] == "Employer"
-
-KEY = ["case_number", "election_date"]
-pre = before.groupby(KEY).agg(
-    n_docs_before_vote=("document", "size"),
-    pre_hearing=("hearing", "any"),
-    pre_postponed=("postponed", "any"),
-    pre_ulp_blocking=("blocking", "any"),
-    pre_request_review=("review", "any"),
-    n_employer_filings_before_vote=("by_employer", "sum"),
-)
-case_docket = elections.merge(pre.reset_index(), on=KEY, how="left")
-for col in case_docket.columns.drop(KEY):
-    case_docket[col] = case_docket[col].fillna(0).astype(int)
-
-df = df.merge(case_docket, on=KEY, how="left", validate="many_to_one")
+# add the petition date onto the elections
 df = df.merge(petition_date, on="case_number", how="left")
-df["has_docket"] = df["case_number"].isin(n_docs.index).astype(int)
-# fall back to the report's own file date (early reports only) when no petition was found
-df["petition_date"] = df["petition_date"].fillna(df["file_date"])
-df["days_petition_to_election"] = (df["election_date"] - df["petition_date"]).dt.days
-bad = df["days_petition_to_election"] < 0
-print(f"\npetition after the vote (set to missing): {bad.sum()}")
-df.loc[bad, "days_petition_to_election"] = np.nan
 
-print(f"docket found for {df['has_docket'].sum()} of {len(df)} elections")
+# no petition in the docket -> use the report's own file date (early reports only)
+petition_from_docket = df["petition_date"].notna()
+df["petition_date"] = df["petition_date"].fillna(df["file_date"])
+petition_from_report = df["petition_date"].notna() & ~petition_from_docket
+
+# days from petition to election. a petition after the vote is a bad date
+df["days_petition_to_election"] = (df["election_date"] - df["petition_date"]).dt.days
+petition_after_vote = df["days_petition_to_election"] < 0
+print(f"\npetition after the vote (set to missing): {petition_after_vote.sum()}")
+df.loc[petition_after_vote, "days_petition_to_election"] = np.nan
+
 print(f"petition date found: {df['petition_date'].notna().sum()} "
-      f"(from the docket: {df['case_number'].isin(petition_date.index).sum()}, "
-      f"from the report's file date: {(df['petition_date'].notna() & ~df['case_number'].isin(petition_date.index)).sum()})")
+      f"(from the docket: {petition_from_docket.sum()}, from the report's file date: {petition_from_report.sum()})")
 print(df["days_petition_to_election"].describe().round(1).to_dict())
 
 
-# %%
-# ---------- save ----------
 
 """
 column order for the output. everything here is known before the vote
-except the target (post-vote columns were dropped in the vote checks cell)
+except the target 
 """
 KEEP = [
     # ids / bookkeeping
-    "source_pdf", "fiscal_year", "case_number", "case_type", "region",
+    "fiscal_year", "case_number", "case_type", "region",
     # from the reports
     "case_name", "employer", "city", "state", "census_region",
-    "union_name", "parent_union", "method", "eligible", "file_date", "election_date",
+    "union_name", "parent_union", "eligible", "file_date", "election_date",
     # participants
-    "n_participants", "employer_has_lawyer", "n_employer_lawyers", "employer_mgmt_firm",
-    "employer_law_firm", "petitioner_has_lawyer", "n_petitioner_lawyers",
+    "n_participants", "employer_has_lawyer", "n_employer_lawyers",
+    "employer_law_firms", "petitioner_has_lawyer", "n_petitioner_lawyers",
     "has_intervenor",
     # docket
-    "petition_date", "days_petition_to_election", "n_docs_before_vote", "pre_hearing",
-    "pre_postponed", "pre_ulp_blocking", "pre_request_review", "n_employer_filings_before_vote",
-    "has_docket",
+    "petition_date", "days_petition_to_election",
     # target
     "union_won",
 ]
+# make sure no column was forgotten or left over
 assert set(KEEP) == set(df.columns), set(KEEP) ^ set(df.columns)
-clean = df[KEEP].sort_values(["election_date", "case_number"]).reset_index(drop=True)
+
+clean = df[KEEP]
+clean = clean.sort_values(["election_date", "case_number"])
+clean = clean.reset_index(drop=True)
 clean.to_csv(OUT_CSV, index=False)
 print(f"\nsaved {clean.shape} to {OUT_CSV}")
 print(clean["union_won"].value_counts(normalize=True).round(3).to_dict())
@@ -597,6 +668,6 @@ TODO (still to do)
 - The rows the checks flag were looked into in data/data_checks.md, and the
   fixes from there are applied above. Any new fix that needs the vote counts
   has to go before the vote checks cell drops them.
-- employer_law_firm has spelling variants ("Jackson Lewis P.C." vs
+- employer_law_firms has spelling variants ("Jackson Lewis P.C." vs
   "Jackson Lewis, P.C.", "Ogletree Deakins"); normalize before using it.
 '''
