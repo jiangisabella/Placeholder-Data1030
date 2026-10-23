@@ -1,9 +1,12 @@
 # Data checks: what they test, what they found, what to do
 
-`src/preprocess.py` prints a set of **checks** as it runs. A check is a count that tests
+`src/preprocessmanual.py` prints a set of **checks** as it runs. A check is a count that tests
 whether the data, or a cleaning step, makes sense. It doesn't change the data unless
 noted. This file explains each check, looks into the rows it flags, and recommends
 whether to keep, fix or drop them.
+
+A few checks (1, 2, 4 and 14) found nothing to fix and have since been taken out of the
+script to keep it simple. Their findings are kept here for the record.
 
 The numbers are from the 15,357 single-union RC elections left after step 4 of the
 pipeline.
@@ -39,31 +42,32 @@ tally agrees with the label, it matches `union_won` for 14,057 of 14,067 rows (9
 
 | # | Check | Rows | Cause | Recommendation |
 |---|---|---|---|---|
-| 1 | Unparseable numbers / dates | 0 | none | nothing to do |
-| 2 | Case type ≠ case number | 0 | none | nothing to do |
+| 1 | Unparseable numbers / dates | 0 | none | nothing to do (check removed) |
+| 2 | Case type ≠ case number | 0 | none | use the "Case Type" column directly (check removed) |
 | 3 | Exact repeats | 112 | overlapping reports, reopened cases | already dropped (keep one row each) |
-| 4 | Same vote under two case types | 0 | none with RC only | nothing to do |
+| 4 | Same vote under two case types | 0 | none with RC only | nothing to do (check removed) |
 | 5 | Target from WON/LOSS fallback | 204 | 2 FY2012 reports have no closed reason | **keep**, docket agrees 173/173 |
 | 6 | No target | 0 | none | nothing to do |
 | 7a | Closed reason contradicted by the docket **and** the tally or WON/LOSS column | 33 | wrong closed reason in the report | **fix** `union_won` to the docket's value |
 | 7b | Multi-unit case where a unit's label contradicts its own tally | 19 | case-level outcome repeated on each unit's row | **drop** |
 | 8 | `union_won` ≠ vote majority (other rows) | ~200 | wrong vote counts in the NLRB's own data | **keep**, the label is confirmed |
-| 9 | More votes than eligible voters | 146 | `eligible` = 0 (71) or typos in counts / `eligible` | **keep**, see check 11 |
+| 9 | More votes than eligible voters | 146 | `eligible` = 0 (71) or typos in counts / `eligible` | **keep rows, set `eligible` to missing** |
 | 10 | No valid votes (0–0) | 48 | tally never entered | **keep** |
 | 11 | Eligible = 0 or missing | 85 | NLRB records "not entered" as 0 | **set 0 to missing**, keep rows |
 | 12 | Election date after case closed | 3 | date typos | already set to missing, see 13 |
 | 13 | No election date | 123 | blank in the PDF | **fill from docket tally date** (97), **drop** the rest (26) |
-| 14 | Closed > 1 year after the vote | 185 | real litigation (objections, Board review) | **keep** |
+| 14 | Closed > 1 year after the vote | 185 | real litigation (objections, Board review) | **keep** (check removed) |
 | 15 | State with no census region | 0 | none | nothing to do |
-| 16 | No participants / no docket | 4 | not found by the scraper | **keep**, features stay missing |
+| 16 | No participants | 4 | not found by the scraper | **keep**, features stay missing |
 | 17 | Petition dated after the vote | 4 | docket upload date, not filing date | already set to missing |
 | 18 | Petition → election > 1 year | 113 | litigated or blocked cases | **keep** |
 | 19 | No petition date | 707 | the public docket doesn't list the petition | **keep**, feature stays missing |
 
-**Status: all recommendations are applied in `src/preprocess.py`.** 45 rows dropped
-(19 + 26), 33 labels corrected (19 to won, 14 to lost), every `eligible` of 0 set to missing,
-and 97 election dates filled. `data/elections_clean.csv` now has **15,312 rows × 34 columns**.
-The script prints each of these counts when it runs.
+**Status: all recommendations are applied in `src/preprocessmanual.py`.** 45 rows dropped
+(19 + 26), 33 labels corrected (19 to won, 14 to lost), `eligible` set to missing where it's 0
+or smaller than the votes cast (157 missing in the final data), and 97 election dates filled.
+`data/elections_clean.csv` now has **15,312 rows × 24 columns**. The script prints each of
+these counts when it runs.
 
 The numbers in the sections below are from **before** these fixes (15,357 rows), so they
 describe the raw anomalies. After the fixes, `union_won` and the vote majority disagree on 190
@@ -76,14 +80,17 @@ rows instead of 240. Those are the wrong-tally rows in check 8, which are kept.
 **What it checks:** while loading each year, any cell in a number column (`eligible`, vote
 counts) that isn't a number, or any date that doesn't parse as `m/d/yyyy`.
 
-**Result:** 0. Every value converted cleanly.
+**Result:** 0. Every value converted cleanly, so the per-column printout was removed from
+`load_year`.
 
 ## 2. Case type column vs case number
 
 **What it checks:** the case number contains the case type (`01-RC-216927` → RC). The
 reports also have a separate "Case Type" column. The check counts rows where the two disagree.
 
-**Result:** 0. The case number is a safe source for `case_type` and `region`.
+**Result:** 0, and the "Case Type" column is filled in on all 18,995 raw rows. So
+`case_type` is now taken straight from that column, and the check was removed. `region` still
+comes from the first two digits of the case number.
 
 ## 3. Exact repeats
 
@@ -103,7 +110,8 @@ win in August 2017.
 **What it checks:** one election filed as both an RC and an RM or RD case (same place, date and
 counts, different case number).
 
-**Result:** 0. Only RC cases are kept, so the RM/RD copy is already gone.
+**Result:** 0. Only RC cases are kept, so the RM/RD copy is already gone. With RC only it
+can never find anything, so the check was removed.
 
 ## 5. Target taken from the WON/LOSS column
 
@@ -275,9 +283,11 @@ The typos are in different fields, and are in the PDFs themselves:
 - **01-RC-075540**: **2** eligible, 28–29 votes. The source PDF prints 2, but nlrb.gov
   now says 58, so here `eligible` is the wrong field.
 
-**Decision:** **keep.** Without looking up each case you can't tell which field is wrong. Only
-`eligible` is a feature, and at most ~75 rows (0.5%) are affected. Optional: set
-`eligible` to missing for the 20 rows over by more than 50%.
+**Decision:** **keep the rows, set `eligible` to missing on all of them.** Without looking up
+each case you can't tell which field is wrong, but the label is fine either way. Only
+`eligible` is a feature, so a wrong unit size would mislead the model; treating it as missing
+is the same choice as for `eligible` = 0 (check 11). Replacing it with the vote total was
+ruled out, since that uses post-vote information.
 
 ## 10. No valid votes (0–0)
 
@@ -319,14 +329,18 @@ ballots counted.
 |---|---|---|---|
 | 29-RC-012045 | 2012-01-18 | 2011-12-20 | none |
 | 22-RC-081724 | 2012-09-13 | 2012-09-06 | 2012-06-30 |
-| 09-RC-286639 | 2022-08-31 | 2022-08-26 | none |
+| 09-RC-286639 | 2022-08-31 | 2022-08-26 | 2022-01-25 |
 
-**Decision:** already handled. They're included in check 13, which fills 22-RC-081724.
+None of these is a wrong year: the year matches the report, but the month or day is off, so
+the year can't be used to repair them.
+
+**Decision:** already handled. They're included in check 13, which fills 22-RC-081724 and
+09-RC-286639 from the docket tally. 29-RC-012045 has no tally and is dropped.
 
 ## 13. No election date
 
-**What it checks:** rows with no election date. The date is needed for the time-based split,
-for the pre-vote docket features and for `days_petition_to_election`.
+**What it checks:** rows with no election date. The date is needed for the time-based split
+and for `days_petition_to_election`.
 
 **Result:** 123 rows (the 3 above plus 120 where the PDF cell is blank). They cluster
 in a few reports (9 in `FY2020/july-2020-pdf.pdf`). They all have vote counts, so the
@@ -337,7 +351,7 @@ is a good stand-in for the election date: across all elections with one tally, t
 is 0 days and 74% are within a week (mail-ballot elections are counted later).
 
 **Decision:** **fill the election date from the earliest Tally of Ballots** (97 rows) and
-**drop the remaining 26.** Those can't be placed in time or given docket features.
+**drop the remaining 26.** Those can't be placed in time.
 
 ## 14. Closed more than a year after the vote
 
@@ -350,7 +364,8 @@ certification in court. These are real contested cases, not errors. Their win ra
 (63.8% vs 70.8% overall).
 
 **Decision:** **keep.** `union_won` is the final outcome after all the litigation, which is
-what we want. The delay itself is only known after the vote, so it's not a feature.
+what we want. The delay itself is only known after the vote, so it's not a feature. Since
+nothing is done with these rows, the printout was removed from the script.
 
 ## 15. States with no census region
 
@@ -358,15 +373,16 @@ what we want. The delay itself is only known after the vote, so it's not a featu
 
 **Result:** 0.
 
-## 16. No participants / no docket
+## 16. No participants
 
-**What it checks:** elections whose case wasn't found in the scraped participants or docket
-files.
+**What it checks:** elections whose case wasn't found in the scraped participants file. The
+script prints "participants found for 15308 of 15312 elections".
 
-**Result:** the same 4 cases are missing from both: 19-RC-067978, 02-RC-069853, 34-RC-084177,
-24-RC-089605 (all 2011–2012).
+**Result:** 4 cases: 19-RC-067978, 02-RC-069853, 34-RC-084177, 24-RC-089605 (all 2011–2012).
+They're also missing from the docket.
 
-**Decision:** **keep.** Their participant and docket features stay missing.
+**Decision:** **keep.** Their participant features stay missing, and their petition date can
+only come from the report's file date.
 
 ## 17. Petition dated after the vote
 
@@ -403,7 +419,7 @@ models), handle it in feature engineering (cap or log), not by dropping rows.
 **What it checks:** elections with no petition date, so `days_petition_to_election` is missing.
 The script prints how many petition dates it found and where each came from.
 
-**Result:** 14,605 of 15,312 have one: 14,453 from the docket, 152 from the report's file date
+**Result:** 14,605 of 15,312 have one: 14,452 from the docket, 153 from the report's file date
 (early reports only). Where both exist, they're the same day 86% of the time and within 3 days
 99%.
 

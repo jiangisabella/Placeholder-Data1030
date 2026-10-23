@@ -1,6 +1,11 @@
-# Cleaning plan (for `src/preprocess.ipynb`)
+# Cleaning plan (original)
 
-The raw CSVs from `src/pdfs_to_csv.py` are copied as-is from the PDFs. These are the cleaning steps still to do.
+This was the plan written before the cleaning code. It's now done in
+`src/preprocessmanual.py`, and some choices changed along the way (only RC cases are kept,
+`case_type` comes from the report's own column, the election method isn't used). For what the
+script actually does, see [processingexplained.md](processingexplained.md).
+
+The raw CSVs from `src/pdfs_to_csv.py` are copied as-is from the PDFs. These were the cleaning steps planned.
 
 1. **Load everything as strings** so "01" stays "01":
    ```python
