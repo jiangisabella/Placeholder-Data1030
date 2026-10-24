@@ -1,7 +1,7 @@
 # Predicting NLRB Union Election Outcomes
 
 DATA1030 Fall 2026 final project (Placeholder).
-Team: Isabella Jiang, Sima Raha, Cunyan Ma, Niharika Adari
+Team: Yanan Jiang, Sima Raha, Cunyan Ma, Niharika Adari
 
 ## Overview
 
