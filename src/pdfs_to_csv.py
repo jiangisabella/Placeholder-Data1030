@@ -10,8 +10,7 @@ into a raw CSV. Values are copied as-is; cleaning is a separate step
 Output (anything already on disk is skipped, so it's safe to stop and rerun):
     data/raw_pdfs/<FY>/*.pdf     downloaded reports
     data/raw_csvs/<FY>/*.csv     one CSV per report
-    data/unparsed_lines/*.txt    lines the text parser couldn't split
-    data/skipped_pdfs.txt        reports with no readable text or no elections
+    data/skipped_pdfs.txt        reports with no tables (image-only PDFs) or no elections
 """
 
 import argparse
@@ -31,7 +30,6 @@ FIRST_FY = 2012  # FY2012 = Oct 2011 to Sep 2012
 DATA = Path("data")
 PDF_DIR = DATA / "raw_pdfs"
 CSV_DIR = DATA / "raw_csvs"
-UNPARSED_DIR = DATA / "unparsed_lines"
 SKIPPED_TXT = DATA / "skipped_pdfs.txt"
 
 WAIT = 1  # seconds between requests, so we don't hammer the NLRB site
@@ -183,130 +181,12 @@ def read_tables(pdf, source):
     return rows
 
 
-#2. backup: read line by line
-# Only used when pdfplumber finds no tables in a PDF. Every election row has a
-# case number, so we find those lines and split them up with regexes.
-#
-# What comes after the case number:
-#   ~2011-2014: Name RC FileDate ClosedReason ClosedDate City ST ElectionDate
-#               Eligible Against For Union Method WON/LOSS
-#   later:      [CaseID] Name RC City ST ElectionDate Eligible Against For
-#               Union Method WON/LOSS ClosedDate ClosedReason
-
-ROW_CASE_NO = r"\d{2}-R[CDM]-\d{5,6}"  # RC/RD/RM only
-DATE = r"\d{1,2}/\d{1,2}/\d{4}"
-
-STATES = set("""AL AK AZ AR CA CO CT DE DC FL GA HI ID IL IN IA KS KY LA ME MD
-    MA MI MN MS MO MT NE NV NH NJ NM NY NC ND OH OK OR PA RI SC SD TN TX UT VT
-    VA WA WV WI WY PR GU VI AS MP""".split())
-
-TEXT_COLUMNS = [
-    "source_pdf", "extraction_method", "parse_note", "section",
-    "case_number", "case_id", "case_name", "case_type", "city", "state",
-    "file_date", "closed_reason", "closed_date", "election_date",
-    "eligible", "votes_for", "votes_against", "vote_numbers",
-    "union_name", "election_method", "result", "after_result", "raw_line",
-]
-
-# regex pieces shared by the row patterns
-_id = r"(?:(?P<case_id>1-[A-Z0-9]{4,8})\s+)?"  # some years have an ID like 1-Y1LQL4
-_name = r"(?P<case_name>.*?)\s+(?P<case_type>RC|RD|RM)\s+"
-_votes = r"(?P<eligible>\d+)\s+(?P<votes_against>\d+)\s+(?P<votes_for>\d+)\s+"
-_rest = (r"(?P<union_name>.*?)\s*(?P<election_method>Stipulated|Consent|Directed)?\s*"
-         r"(?P<result>WON|LOSS)\b(?P<after_result>.*)")
-
-# normal row, e.g. "Mayflower Medicinals, Inc. RD Fall River MA 08/19/2026 9 5 4 ..."
-ROW = re.compile(
-    _id + _name + r"(?P<middle>.*?)\s*\b(?P<state>[A-Z]{2})\s+"
-    rf"(?:(?P<election_date>{DATE})\s+)?" + _votes + _rest)
-
-# tall row where the state was printed lower down and landed on a later line
-ROW_NO_STATE = re.compile(
-    _id + _name + rf"(?P<city>.*?)\s+(?P<election_date>{DATE})\s+" + _votes + _rest)
-
-# a few rows have empty vote cells in the PDF
-ROW_FEW_VOTES = re.compile(
-    _id + _name + r"(?P<city>.*?)\s*\b(?P<state>[A-Z]{2})\s+"
-    rf"(?P<election_date>{DATE})\s+" + r"(?P<vote_numbers>(?:\d+\s+){0,2})" + _rest)
-
-# ~2011-2014 reports put the file date and closing info before the city
-DATES_THEN_CITY = re.compile(
-    rf"(?P<file_date>{DATE})\s+(?P<closed_reason>.*?)\s+(?P<closed_date>{DATE})\s+(?P<city>.*)")
-
-
-def split_row(text, try_harder=False):
-    """Split one text line into named fields. Returns None if nothing fits."""
-    case = re.search(ROW_CASE_NO, text)
-    rest = text[case.end():].strip()
-
-    m = ROW.search(rest)
-    if m:
-        row = m.groupdict()
-        middle = row.pop("middle")
-        dates = DATES_THEN_CITY.match(middle)
-        row.update(dates.groupdict() if dates else {"city": middle})
-    elif not try_harder:
-        return None
-    elif m := ROW_NO_STATE.search(rest):
-        row = m.groupdict()
-        # the state is somewhere in the wrapped lines glued on after the result
-        states = [w for w in row["after_result"].split() if w in STATES]
-        row["state"] = states[0] if states else ""
-        row["parse_note"] = "state found in wrapped text, check it"
-    elif m := ROW_FEW_VOTES.search(rest):
-        row = m.groupdict()
-        row["vote_numbers"] = row["vote_numbers"].strip()
-        row["parse_note"] = "fewer than 3 vote numbers in PDF"
-    else:
-        return None
-
-    row["case_number"] = case.group()
-    return row
-
-
-def wrapped_lines(lines, i, n=4):
-    """The (up to n) lines after line i that still belong to the same row."""
-    out = []
-    for line in lines[i + 1:i + 1 + n]:
-        line = line.strip()
-        if re.search(ROW_CASE_NO, line) or line.startswith(("Region", "NLRB", "Time run")):
-            break
-        out.append(line)
-    return out
-
-
-def read_text(pdf, source):
-    lines = [l for page in pdf.pages for l in (page.extract_text() or "").splitlines()]
-
-    rows, unparsed = [], []
-    section = ""
-    for i, line in enumerate(lines):
-        line = line.strip()
-        if line.startswith("NLRB Elections"):  # e.g. "NLRB Elections with 2 Labor Organizations"
-            section = line
-        if not re.search(ROW_CASE_NO, line):
-            continue
-
-        row = split_row(line)
-        if row is None:  # long names wrap onto the next lines: glue them on and retry
-            line = " ".join([line] + wrapped_lines(lines, i))
-            row = split_row(line, try_harder=True)
-        if row is None:
-            unparsed.append(line)
-            continue
-
-        row.update(source_pdf=source, extraction_method="text", section=section, raw_line=line)
-        rows.append(row)
-    return rows, unparsed
-
-
 #3. write the CSVs
 
-def write_csv(rows, path, columns=None):
-    if columns is None:
-        # table files: keep the PDF's own columns, in the order they first appear
-        columns = ["source_pdf", "extraction_method", "page"]
-        columns += [c for c in dict.fromkeys(c for row in rows for c in row) if c not in columns]
+def write_csv(rows, path):
+    # keep the PDF's own columns, in the order they first appear
+    columns = ["source_pdf", "extraction_method", "page"]
+    columns += [c for c in dict.fromkeys(c for row in rows for c in row) if c not in columns]
 
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", newline="", encoding="utf-8") as f:
@@ -316,15 +196,10 @@ def write_csv(rows, path, columns=None):
 
 
 def parse_pdf(pdf_path, source):
-    """Try the tables first, fall back to the text. Returns rows, unparsed lines,
-    CSV columns (None = the table's own), method used, and first-page text."""
+    """Returns the table rows and the first page's text."""
     with pdfplumber.open(pdf_path) as pdf:
         first_page = " ".join((pdf.pages[0].extract_text() or "").split())
-        rows = read_tables(pdf, source)
-        if rows:
-            return rows, [], None, "table", first_page
-        rows, unparsed = read_text(pdf, source)
-        return rows, unparsed, TEXT_COLUMNS, "text", first_page
+        return read_tables(pdf, source), first_page
 
 
 def convert_all(redo=False):
@@ -343,11 +218,10 @@ def convert_all(redo=False):
             continue
         source = f"{fy}/{pdf_path.name}"
         csv_path = CSV_DIR / fy / f"{pdf_path.stem}.csv"
-        unparsed_path = UNPARSED_DIR / f"{fy}_{pdf_path.stem}.txt"
         if not redo and (csv_path.exists() or source in already_skipped):
             continue
 
-        rows, unparsed, columns, how, first_page = parse_pdf(pdf_path, source)
+        rows, first_page = parse_pdf(pdf_path, source)
 
         if not rows:
             # either the report really has no elections (Oct 2025), or the PDF
@@ -358,16 +232,8 @@ def convert_all(redo=False):
             print(f"  {source}: skipped ({why})")
             continue
 
-        write_csv(rows, csv_path, columns)
-
-        # lines we couldn't split go in their own file so someone can check them
-        if unparsed:
-            UNPARSED_DIR.mkdir(parents=True, exist_ok=True)
-            unparsed_path.write_text("\n".join(unparsed), encoding="utf-8")
-        elif unparsed_path.exists():
-            unparsed_path.unlink()
-
-        print(f"  {source}: {len(rows)} rows ({how}), {len(unparsed)} unparsed")
+        write_csv(rows, csv_path)
+        print(f"  {source}: {len(rows)} rows")
 
     if skipped:
         SKIPPED_TXT.parent.mkdir(parents=True, exist_ok=True)
