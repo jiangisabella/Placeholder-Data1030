@@ -251,7 +251,7 @@ def export_merged_docket(conn):
     print(f"Merged file: {MERGED_DOCKET_FILE}")
 
 
-# 6. Batch scrapi
+# 6. Batch scraping
 
 def batch_scrape(case_numbers):
     conn = open_checkpoint()

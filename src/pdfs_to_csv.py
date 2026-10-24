@@ -3,17 +3,17 @@ Download the NLRB monthly election reports (FY2012 onward) and turn each PDF
 into a raw CSV. Values are copied as-is; cleaning is a separate step
 (see cleaning_plan.md).
 
-    python src/pdfs_to_csv.py                 # download new PDFs, convert new ones
-    python src/pdfs_to_csv.py --redo          # rebuild every CSV
-    python src/pdfs_to_csv.py --no-download   # only convert PDFs already on disk
+    python src/pdfs_to_csv.py
 
-Output (anything already on disk is skipped, so it's safe to stop and rerun):
+Change DOWNLOAD / REDO_CSVS below to pick what runs. Anything already on
+disk is skipped, so it's safe to stop and rerun.
+
+Output:
     data/raw_pdfs/<FY>/*.pdf     downloaded reports
     data/raw_csvs/<FY>/*.csv     one CSV per report
     data/skipped_pdfs.txt        reports with no tables (image-only PDFs) or no elections
 """
 
-import argparse
 import csv
 import re
 import time
@@ -24,39 +24,49 @@ import pdfplumber
 import requests
 from bs4 import BeautifulSoup
 
+
+# Configuration
+
+DATA_DIR = Path("data")
+PDF_DIR = DATA_DIR / "raw_pdfs"
+CSV_DIR = DATA_DIR / "raw_csvs"
+SKIPPED_FILE = DATA_DIR / "skipped_pdfs.txt"
+
 INDEX_URL = "https://www.nlrb.gov/reports/agency-performance/election-reports"
 FIRST_FY = 2012  # FY2012 = Oct 2011 to Sep 2012
 
-DATA = Path("data")
-PDF_DIR = DATA / "raw_pdfs"
-CSV_DIR = DATA / "raw_csvs"
-SKIPPED_TXT = DATA / "skipped_pdfs.txt"
+DOWNLOAD = True    # False = only convert PDFs already on disk
+REDO_CSVS = False  # True = rebuild CSVs that already exist
+REQUEST_DELAY = 1  # seconds between requests
 
-WAIT = 1  # seconds between requests, so we don't hammer the NLRB site
-HEADERS = {"User-Agent": "DATA1030 class project"}
-
-
-#1. download
-
-def fetch(url, tries=3):
-    """GET a url, retrying a couple of times if the connection drops."""
-    for attempt in range(1, tries + 1):
-        time.sleep(WAIT)
-        try:
-            r = requests.get(url, headers=HEADERS, timeout=120)
-            r.raise_for_status()
-            return r
-        except requests.exceptions.RequestException as e:
-            print(f"    attempt {attempt} failed: {e}")
-            if attempt == tries:
-                raise
-            time.sleep(5 * attempt)
+HEADERS = {
+    "User-Agent": "DATA1030 student research project"
+}
 
 
-def page_links(url):
-    """All links on a page as absolute urls, without repeats, in page order."""
-    soup = BeautifulSoup(fetch(url).text, "html.parser")
-    return list(dict.fromkeys(urljoin(url, a["href"]) for a in soup.find_all("a", href=True)))
+# 1. Download the PDFs
+
+def get_page(url, session):
+    response = session.get(url, headers=HEADERS, timeout=60)
+
+    if response.status_code in (403, 429):
+        raise RuntimeError(f"Access restricted: HTTP {response.status_code}")
+
+    response.raise_for_status()
+    time.sleep(REQUEST_DELAY)
+    return response
+
+
+def find_links(url, session):
+    # every link on the page as a full url, in page order, no repeats
+    soup = BeautifulSoup(get_page(url, session).text, "html.parser")
+
+    links = []
+    for a in soup.find_all("a", href=True):
+        link = urljoin(url, a["href"])
+        if link not in links:
+            links.append(link)
+    return links
 
 
 def is_pdf(url):
@@ -64,41 +74,56 @@ def is_pdf(url):
 
 
 def download_all():
-    index_links = page_links(INDEX_URL)
+    with requests.Session() as session:
+        index_links = find_links(INDEX_URL, session)
 
-    # PDFs linked straight from the index are the yearly summaries, not monthly reports
-    summary_pdfs = {u for u in index_links if is_pdf(u)}
+        # PDFs linked straight from the index are the yearly summaries, not monthly reports
+        summary_pdfs = [link for link in index_links if is_pdf(link)]
 
-    # the index links one page per fiscal year, like .../election-reports-fy-2026
-    year_pages = {}
-    for u in index_links:
-        m = re.search(r"election-reports-fy-(\d{4})", u)
-        if m and int(m.group(1)) >= FIRST_FY:
-            year_pages.setdefault(u, f"FY{m.group(1)}")
-    print(f"{len(year_pages)} fiscal years to check")
+        # the index links one page per fiscal year, like .../election-reports-fy-2026
+        year_pages = []
+        for link in index_links:
+            m = re.search(r"election-reports-fy-(\d{4})", link)
+            if m and int(m.group(1)) >= FIRST_FY:
+                page = ("FY" + m.group(1), link)
+                if page not in year_pages:
+                    year_pages.append(page)
+        print(f"{len(year_pages)} fiscal years to check")
 
-    failed = []
-    for page_url, fy in year_pages.items():
-        for pdf_url in filter(is_pdf, page_links(page_url)):
-            name = pdf_url.rsplit("/", 1)[-1]
-            path = PDF_DIR / fy / name
-            if pdf_url in summary_pdfs or "total" in name.lower() or path.exists():
-                continue
-            try:
-                content = fetch(pdf_url).content
-            except requests.exceptions.RequestException:
-                failed.append(pdf_url)
-                continue
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(content)
-            print(f"  got {fy}/{name}")
+        failed = []
+        try:
+            for fy, page_url in year_pages:
+                for pdf_url in find_links(page_url, session):
+                    name = pdf_url.split("/")[-1]
+                    path = PDF_DIR / fy / name
+
+                    # skip non-PDFs, the yearly totals, and anything already downloaded
+                    if not is_pdf(pdf_url) or pdf_url in summary_pdfs:
+                        continue
+                    if "total" in name.lower() or path.exists():
+                        continue
+
+                    try:
+                        content = get_page(pdf_url, session).content
+                    except requests.RequestException as error:
+                        print(f"  Failed: {fy}/{name} ({error})")
+                        failed.append(pdf_url)
+                        continue
+
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(content)
+                    print(f"  got {fy}/{name}")
+
+        except RuntimeError as error:
+            print(f"Stopped: {error}")
 
     if failed:
         print(f"\n{len(failed)} downloads failed, run again to retry:")
-        print("\n".join("  " + u for u in failed))
+        for url in failed:
+            print("  " + url)
 
 
-#2. read the tables
+# 2. Read the tables in each PDF
 
 CASE_NO = r"\d{2}-[A-Z]{2}-\d{5,6}"  # e.g. 01-RD-386098
 
@@ -181,12 +206,15 @@ def read_tables(pdf, source):
     return rows
 
 
-#3. write the CSVs
+# 3. Write the CSVs
 
 def write_csv(rows, path):
     # keep the PDF's own columns, in the order they first appear
     columns = ["source_pdf", "extraction_method", "page"]
-    columns += [c for c in dict.fromkeys(c for row in rows for c in row) if c not in columns]
+    for row in rows:
+        for col in row:
+            if col not in columns:
+                columns.append(col)
 
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", newline="", encoding="utf-8") as f:
@@ -202,15 +230,15 @@ def parse_pdf(pdf_path, source):
         return read_tables(pdf, source), first_page
 
 
-def convert_all(redo=False):
+def convert_all():
     pdfs = sorted(PDF_DIR.glob("FY*/*.pdf"))
     print(f"\n{len(pdfs)} PDFs on disk")
 
-    # PDFs skipped last time are slow to open, so don't retry them unless --redo
+    # PDFs skipped last time are slow to open, so don't retry them unless REDO_CSVS
     skipped = []
-    if SKIPPED_TXT.exists() and not redo:
-        skipped = SKIPPED_TXT.read_text(encoding="utf-8").splitlines()
-    already_skipped = {line.split(":")[0] for line in skipped}
+    if SKIPPED_FILE.exists() and not REDO_CSVS:
+        skipped = SKIPPED_FILE.read_text(encoding="utf-8").splitlines()
+    already_skipped = [line.split(":")[0] for line in skipped]
 
     for pdf_path in pdfs:
         fy = pdf_path.parent.name
@@ -218,7 +246,7 @@ def convert_all(redo=False):
             continue
         source = f"{fy}/{pdf_path.name}"
         csv_path = CSV_DIR / fy / f"{pdf_path.stem}.csv"
-        if not redo and (csv_path.exists() or source in already_skipped):
+        if not REDO_CSVS and (csv_path.exists() or source in already_skipped):
             continue
 
         rows, first_page = parse_pdf(pdf_path, source)
@@ -236,18 +264,14 @@ def convert_all(redo=False):
         print(f"  {source}: {len(rows)} rows")
 
     if skipped:
-        SKIPPED_TXT.parent.mkdir(parents=True, exist_ok=True)
-        SKIPPED_TXT.write_text("\n".join(skipped) + "\n", encoding="utf-8")
-        print(f"\n{len(skipped)} PDFs skipped, see {SKIPPED_TXT}")
+        SKIPPED_FILE.parent.mkdir(parents=True, exist_ok=True)
+        SKIPPED_FILE.write_text("\n".join(skipped) + "\n", encoding="utf-8")
+        print(f"\n{len(skipped)} PDFs skipped, see {SKIPPED_FILE}")
 
+
+# 4. Main
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=__doc__,
-                                     formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--redo", action="store_true", help="rebuild CSVs that already exist")
-    parser.add_argument("--no-download", action="store_true", help="skip the download step")
-    args = parser.parse_args()
-
-    if not args.no_download:
+    if DOWNLOAD:
         download_all()
-    convert_all(redo=args.redo)
+    convert_all()
