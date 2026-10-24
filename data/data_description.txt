@@ -1,0 +1,111 @@
+fiscal_year: the year the union election takes place
+
+	2012
+	2013
+	...
+	2026
+
+
+case_number: a unique string assigned by NLRB to identify each election case (*)
+
+
+case_name: a unique descriptor assigned by NLRB to identify each election case (*)
+
+
+employer: the employer of which the union election takes place (*)
+
+
+city: the city in which the union election takes place (*)
+
+
+state: the state in which the union election takes place
+
+	AL   alabama
+	AK   alaska
+	...
+	WI   wisconsin
+	WY   wyoming
+
+
+census_region: groups states into four geographic regions according to census conventions
+
+	Northeast
+	Midwest
+	South
+	West
+
+
+union_name: name of union that the election is voted under (*)
+
+
+parent_union: parent union that the election union is part of
+
+	Teamsters    
+	SEIU
+	UFCW
+	IBEW
+	IAM
+	USW
+	UAW
+	CWA
+	IUOE
+	LIUNA
+	AFSCME
+	SPFPA
+	UNITE HERE
+	AFT
+	Nurses
+	Carpenters
+	IUPAT
+	Other
+
+
+eligible: count of eligible voters in a union election
+
+
+petition_date (yyyy-mm-dd): date on which the union election is petitioned to the NLRB (*)
+
+
+election_date (yyyy-mm-dd): date on which the union election takes place (*)
+
+
+days_petition_to_election: duration between election date and petition date, counted in days
+
+
+n_participants: count of voters who participated in the election
+
+
+employer_has_lawyer: whether the employer is supported by lawyers against the election
+
+	1  the employer has lawyers
+	0  the employer doesn't have lawyers
+
+
+n_employer_lawyers: number of lawyers the employer has against the election
+
+
+employer_law_firms: names of the employers' lawyers' law firms (&)
+
+
+petitioner_has_lawyer: whether the union is supported by lawyers for the election
+
+	1  union supported by lawyers
+	0  unions not supported by lawyers
+
+
+n_petitioner_lawyers: number of lawyers the union has for the election
+
+
+has_intervenor: describes the presence of intervenors during the election
+
+	1  has intervenors
+	0  does not have intervenors
+
+
+union_won: describes the union election result based on vote counts
+
+	1 	win; more than 50% of voters are for the union
+    0 	lose; more than 50% of voters are against the union
+
+
+(*) are desriptive variables that will likely not be used in the ML pipeline
