@@ -8,7 +8,7 @@ Team: Isabella Jiang, Sima Raha, Cunyan Ma, Niharika Adari
 This project predicts whether a union wins a National Labor Relations Board (NLRB)
 representation election, using information available before the vote. We built the
 dataset ourselves by extracting the NLRB's monthly election reports (FY2012–FY2026) from
-PDFs and scraping each case's docket and participant list from nlrb.gov, giving 15,312
+PDFs and scraping each case's docket and participant list from nlrb.gov, giving 15,270
 single-union elections. Organizing campaigns take months of effort, so understanding which
 factors relate to winning could help union organizers decide where to focus their
 resources, and help researchers study how factors like employer legal representation or
@@ -20,7 +20,7 @@ All data comes from the National Labor Relations Board (NLRB):
 - Monthly election reports (PDFs): https://www.nlrb.gov/reports/agency-performance/election-reports
 - Case docket pages: https://www.nlrb.gov/search/case
 
-The cleaned dataset, `data/elections_clean.csv`, has 15,312 single-union RC elections
+The cleaned dataset, `data/elections_clean.csv`, has 15,270 single-union RC elections
 (FY2012–FY2026) and 23 columns. The target is `union_won` (1 = union won, 0 = lost).
 - Column descriptions: `data/data_description.md`
 - How the cleaning works, step by step: `processingexplained.md`
