@@ -111,16 +111,15 @@ def load_year(fy_dir):
     for f in sorted(fy_dir.glob("*.csv")):
         #reading as string is best so 0 isn't ignored in beginning of case numbers
         df = pd.read_csv(f, dtype=str, keep_default_na=False)
+        #skip files
         if df["source_pdf"].iloc[0] in DROP_FILES:
             continue
+        #drop unneeded columns
         df = df.drop(columns=DROP_COLUMNS, errors="ignore")
-        #stop if a report has a header we haven't seen before
-        unknown = set(df.columns) - set(HEADERS) - {"page"}
-        if unknown:
-            raise ValueError(f"{f}: no rename for {sorted(unknown)}")
+        #merge the df with the standardized headers
         frames.append(df.rename(columns=HEADERS))
 
-    #merge all frames
+    #merge all moth dataframes to one
     df = pd.concat(frames, ignore_index=True)
     #Adding missing columns as blank
     for col in HEADERS.values():
@@ -130,7 +129,7 @@ def load_year(fy_dir):
     df["fiscal_year"] = int(fy_dir.name[2:])
     for col in df.columns.drop(["page", "fiscal_year"]):
         df[col] = clean_text(df[col])
-    #numbers like 1,234 -> 1234, blanks become NaN
+    #number cleaning
     for col in NUMBER_COLS:
         df[col] = pd.to_numeric(df[col].str.replace(",", ""), errors="coerce")
     #some years write 4/1/2026, others 04/01/2026. %m and %d take both
@@ -150,14 +149,13 @@ print(f"\nmerged: {raw.shape}")
 df = raw.copy()
 
 # RC = workers/union petition to have a union certified
-print(f"case types: {df['case_type'].value_counts().to_dict()}, keeping RC")
 df = df[df["case_type"] == "RC"].copy()
 
 """
 Dropping columns:
 - region_offices (NLRB office codes, not used)
 - case id, internal data, unusable
-- columns known only after vote ends like union_to_certify
+- columns known only after vote ends
 """
 df = df.drop(columns=["region_offices", "case_id", "page", "union_to_certify"])
 
@@ -176,12 +174,8 @@ VOTE_KEY = ["case_number", "election_date", "eligible", "votes_for", "votes_agai
 
 """
 Since we want single unions only, will count for the numbner of unions
-n_unions = how many unions were on the ballot (1-3), used in the
-multi-union cell below to keep only 1-union elections. 
-this goes by case + date, not the
-full VOTE_KEY, because a few multi-union elections also have a 1-union row
-with different counts (a runoff, or one union's votes split out, e.g.
-29-RC-216339, 05-RC-323238). 
+n_unions = how many unions were on the ballot (1-3)
+this goes by case + date, primary key
 """
 df["n_unions"] = (df[["union_name", "union_name_2", "union_name_3"]] != "").sum(axis=1)
 df["n_unions"] = df.groupby(["case_number", "election_date"], dropna=False)["n_unions"].transform("max")
@@ -191,7 +185,7 @@ Cases can have different votes on an election date.
 n_units = how many different votes (eligible + counts) one case has on one
 election date, across every report. 
 """
-units = df[["case_number", "election_date", "eligible", "votes_for", "votes_against"]].drop_duplicates()
+units = df[VOTE_KEY].drop_duplicates()
 n_units = units.groupby(["case_number", "election_date"]).size().rename("n_units")
 df = df.merge(n_units, on=["case_number", "election_date"], how="left")
 
@@ -202,24 +196,21 @@ Repeats occur because of overlapping months.
 For cases that are reopened/closed, keeping the latest final legal outcome.
 Or the copy that has the closed reason/outcome specified.
 """
-df["has_reason"] = df["closed_reason"] != ""
+df["has_reason"] = (df["closed_reason"] != "")
 df = df.sort_values(["has_reason", "closed_date"], na_position="first")
-dup = df.duplicated(VOTE_KEY, keep="last")
-print(f"exact repeats dropped: {dup.sum()}")
-df = df[~dup].copy()
+is_duplicate = df.duplicated(VOTE_KEY, keep="last")
+print(f"exact repeats dropped: {is_duplicate.sum()}")
+df = df[~is_duplicate].copy()
 
 
 # %%
 """
-Dropping multi-union elections.
+Dropping multi-union elections, and extra columns.
 Elections with 2 or 3 unions on the ballot are dropped. 
 votes_for only counts union 1 there, so the win/loss and vote share mean something
 different.
-Dropping the related columns afterward.
 """
 
-print(f"\nunions on the ballot: {df['n_unions'].value_counts().sort_index().to_dict()}")
-print(f"dropping {(df['n_unions'] > 1).sum()} elections with 2+ unions, keeping {(df['n_unions'] == 1).sum()}")
 df = df[df["n_unions"] == 1].drop(columns=["n_unions", "has_reason", "union_name_2", "union_name_3"])
 
 
@@ -296,8 +287,8 @@ df.loc[is_res, "union_won"] = 0       # Certification of Results = union lost
 df.loc[is_rep, "union_won"] = 1       # Certification of Representative = union won
 
 #union_won from won/loss columns
-# FY2012 / early FY2013 reports have one column with WON or LOSS (renamed to
-# reported_win), later reports put WON in reported_win and LOSS in reported_loss
+# early reports have one column with WON or LOSS.
+# later reports put WON in reported_win and LOSS in reported_loss
 won_col = df["reported_win"] == "WON"
 lost_col = (df["reported_win"] == "LOSS") | (df["reported_loss"] == "LOSS")
 
@@ -307,12 +298,12 @@ df.loc[won_col, "reported_result"] = "won"
 df.loc[won_col & lost_col, "reported_result"] = "both"
 
 #if closed reason is missing, using the result from the won/loss cols
-no_reason = df["union_won"] == -1
+no_reason = (df["union_won"] == -1)
 fill_won = no_reason & (df["reported_result"] == "won")
 fill_lost = no_reason & (df["reported_result"] == "lost")
 df.loc[fill_won, "union_won"] = 1
 df.loc[fill_lost, "union_won"] = 0
-print(f"target taken from WON/LOSS column instead of closed reason: {fill_won.sum() + fill_lost.sum()}")
+print(f"target taken from WON/LOSS column instead, because missing closed reason: {fill_won.sum() + fill_lost.sum()}")
 
 #dropping rows with missing data
 no_target = df["union_won"] == -1
@@ -323,60 +314,33 @@ print("\nunion_won vs the report's WON/LOSS columns:")
 print(pd.crosstab(df["union_won"], df["reported_result"]))
 
 """
-checking the target against the docket.
-the report's own tally and WON/LOSS column are the second opinion.
-all three are put on the same 1 / 0 scale as union_won:
+checking the target against the docket and the vote count.
+when they disagree we can't always tell which one is right, so the row is
+dropped instead of guessing.
 - cert: the docket's certification (-1 = none or both)
 - majority_for: 1 if the union got more votes (a tie is a loss)
-- reported: the WON/LOSS column (NaN if it's blank or both)
 """
 cert = df["case_number"].map(docket_cert).fillna(-1)
 majority_for = (df["votes_for"] > df["votes_against"]).astype(int)
-reported = df["reported_result"].map({"won": 1, "lost": 0})
+
+# the docket has one kind of certification and it isn't the label
+docket_disagrees = (cert != -1) & (cert != df["union_won"])
 
 """
 multi-unit cases: separate groups of employees voting the same day, each
-on a ballot with the same single union. the report repeats the case's
-outcome on every unit's row, so a unit that lost can say won
-(22-RC-153083: 5-3 and 4-12, both "Representative"). spotted by different
-counts for one case + date, or a docket with both kinds of certification
+on a ballot with the same single union.  spotted by different
+counts for one case + date, or a docket with both kinds of certification.
+rows marked both WON and LOSS are just as unclear.
 """
 multi_unit = (df["n_units"] > 1) | df["case_number"].isin(both_cases)
-
-"""
-Tracking rows where report label is wrong and docket label is more accurate.
-the report's closed reason is wrong when the docket disagrees and the
-tally or WON/LOSS column on the same row agrees with the docket
-(31-RC-140133: 32-15 vote, report says Results, docket has a
-Certification of Representative on the closing date)
-"""
-has_cert = cert != -1
-docket_disagrees = cert != df["union_won"]
-votes_agree_with_docket = (majority_for == cert)
-report_agrees_with_docket = (reported == cert)
-
-fix = has_cert & docket_disagrees & (votes_agree_with_docket | report_agrees_with_docket) & ~multi_unit
-
-"""
-a unit whose label contradicts its own tally can't be sorted out, and
-neither can a row marked both WON and LOSS that the docket doesn't settle.
-"""
 marked_both = df["reported_result"] == "both"
-label_disagrees_with_votes = (df["union_won"] != majority_for)
+tally_disagrees = (multi_unit | marked_both) & (df["union_won"] != majority_for)
 
-unclear = (multi_unit | marked_both) & label_disagrees_with_votes & ~fix
-
-# apply the docket fix
-fix_to_won = fix & (cert == 1)
-fix_to_lost = fix & (cert == 0)
-df.loc[fix_to_won, "union_won"] = 1
-df.loc[fix_to_lost, "union_won"] = 0
-print(f"\nlabel corrected from the docket: {fix.sum()} "
-      f"({fix_to_won.sum()} to won, {fix_to_lost.sum()} to lost)")
-
-# drop the unclear rows, and the helper columns that are no longer needed
-print(f"multi-unit or both WON and LOSS, label contradicts its own tally (dropped): {unclear.sum()}")
-df = df[~unclear].copy()
+drop = docket_disagrees | tally_disagrees
+print(f"\ndocket disagrees with the label (dropped): {docket_disagrees.sum()}")
+print(f"multi-unit or both WON and LOSS, label contradicts its own tally (dropped): {tally_disagrees.sum()}")
+print(f"total dropped: {drop.sum()}")
+df = df[~drop].copy()
 df = df.drop(columns=["reported_win", "reported_loss", "reported_result", "n_units"])
 
 
@@ -645,25 +609,3 @@ clean.to_csv(OUT_CSV, index=False)
 print(f"\nsaved {clean.shape} to {OUT_CSV}")
 print(clean["union_won"].value_counts(normalize=True).round(3).to_dict())
 print(clean.groupby("fiscal_year")["union_won"].agg(["size", "mean"]).round(3))
-
-
-r'''
-----------------------------------------------------------------------
-TODO (still to do)
-----------------------------------------------------------------------
-- Missing months: Feb-Sep 2023 and Apr 2019 are image-only PDFs and were
-  skipped (data/skipped_pdfs.txt); Oct 2025 had no elections. Reports go by
-  the month a case CLOSED, so elections held then still show up later.
-  Mention the gap in the report and expect a dip in plots over time.
-- Several reports hold fewer rows than their own summary (Jun 2012,
-  Sep 2020, most of FY2021, Dec 2021). The data just isn't in the PDF.
-- Before modeling, drop the bookkeeping columns.
-- Split by election date (test on the latest years), GroupKFold by employer
-  inside the training years. Anything like a union's past win rate can only
-  use earlier elections.
-- The rows the checks flag were looked into in data/data_checks.md, and the
-  fixes from there are applied above. Any new fix that needs the vote counts
-  has to go before the vote checks cell drops them.
-- employer_law_firms has spelling variants ("Jackson Lewis P.C." vs
-  "Jackson Lewis, P.C.", "Ogletree Deakins"); normalize before using it.
-'''

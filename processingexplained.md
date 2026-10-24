@@ -16,14 +16,14 @@ This is the main feature of interest: **`days_petition_to_election`** = election
 petition date. Filing the petition is what opens an RC case, so the petition date and the
 report's "Case File Date" are the same event.
 
-- The petition date comes from the docket (the earliest signed petition) for 14,452 rows. Most
+- The petition date comes from the docket (the earliest signed petition) for 14,413 rows. Most
   reports don't have a file date column, so the docket is the main source.
-- For 153 rows with no petition in the docket, it falls back to the report's file date. Only
+- For 151 rows with no petition in the docket, it falls back to the report's file date. Only
   the early reports have one.
 - Where both exist, they're the same day 86% of the time and within 3 days 99% of the time, so
   combining them is safe.
-- It's filled in for 14,601 of 15,312 elections (median 31 days).
-- **707 have no petition date.** Their dockets are complete but never list the petition; the
+- It's filled in for 14,560 of 15,270 elections (median 31 days).
+- **706 have no petition date.** Their dockets are complete but never list the petition; the
   public docket doesn't show every document. They stay missing (`data/data_checks.md`,
   check 19).
 - **4 more have a petition dated after the vote.** That's a docket upload date, so the gap is
@@ -46,8 +46,9 @@ changed:
 
 | fix | rows | step |
 |---|---|---|
-| label corrected from the docket | 33 | 6 |
-| multi-unit / both WON and LOSS rows that contradict their own tally, dropped | 19 | 6 |
+| docket certification disagrees with the label, dropped | 42 | 6 |
+| multi-unit / both WON and LOSS rows that contradict their own tally, dropped | 46 | 6 |
+| (rows in both of the above, so 61 dropped in total) | 27 | 6 |
 | `eligible` = 0 set to missing | all zeros | 7 |
 | `eligible` set to missing where there are more votes than eligible voters | 145 | 7 |
 | impossible election dates set to missing | 3 | 7 |
@@ -127,12 +128,11 @@ on nlrb.gov by `src/docket_scraping.py`)
   WON/LOSS columns.
 - 204 rows from two FY2012 reports have no closed reason, so they use `reported_result`
   instead.
-- **Correct 33 labels** where the report's closed reason is wrong. The rule: the docket's
-  certification disagrees, **and** the tally or WON/LOSS column on the same row agrees with the
-  docket (19 become wins, 14 losses).
-- **Drop 19 rows** that can't be sorted out:
-  - units in multi-unit cases whose case-level label contradicts their own tally;
-  - one row marked both WON and LOSS that the docket doesn't settle.
+- **Drop 61 rows** whose label can't be trusted. No labels are changed; when the sources
+  disagree, the row is dropped instead of guessing which one is right:
+  - 42 where the docket's certification disagrees with `union_won`;
+  - 46 in multi-unit cases, or marked both WON and LOSS, whose label contradicts their own
+    tally (27 rows are in both groups).
 - **Drop** `reported_win`, `reported_loss`, `reported_result`, `n_units`.
 
 **Step 7: Vote and date checks, then drop post-vote columns**
@@ -142,7 +142,7 @@ on nlrb.gov by `src/docket_scraping.py`)
   feature).
 - Set the 3 impossible election dates (after the case closed) to missing.
 - **Fill 97 missing election dates** from the docket's first Tally of Ballots.
-- **Drop the 26 rows** with no election date and no tally: **15,312 rows.**
+- **Drop the 26 rows** with no election date and no tally: **15,270 rows.**
 - **Drop** `votes_for`, `votes_against`, `closed_date`, `closed_reason`. These are only known
   after the vote, and `union_won` already holds what's needed from them.
 
@@ -174,7 +174,7 @@ on nlrb.gov by `src/docket_scraping.py`)
 - Put the columns in order, check none were missed, sort by election date, and write
   `data/elections_clean.csv`.
 
-**End result: 15,312 rows × 23 columns** (70.8% won).
+**End result: 15,270 rows × 23 columns** (70.8% won).
 
 | | count | columns |
 |---|---|---|
@@ -194,5 +194,5 @@ Row counts through the pipeline:
 | RC only | 16,123 |
 | removing repeats | 16,011 |
 | single-union only | 15,357 |
-| dropping unclear labels | 15,338 |
-| dropping rows with no election date | 15,312 |
+| dropping unclear labels | 15,296 |
+| dropping rows with no election date | 15,270 |

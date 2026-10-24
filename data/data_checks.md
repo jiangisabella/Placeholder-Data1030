@@ -48,8 +48,8 @@ tally agrees with the label, it matches `union_won` for 14,057 of 14,067 rows (9
 | 4 | Same vote under two case types | 0 | none with RC only | nothing to do (check removed) |
 | 5 | Target from WON/LOSS fallback | 204 | 2 FY2012 reports have no closed reason | **keep**, docket agrees 173/173 |
 | 6 | No target | 0 | none | nothing to do |
-| 7a | Closed reason contradicted by the docket **and** the tally or WON/LOSS column | 33 | wrong closed reason in the report | **fix** `union_won` to the docket's value |
-| 7b | Multi-unit case where a unit's label contradicts its own tally | 19 | case-level outcome repeated on each unit's row | **drop** |
+| 7a | Closed reason contradicted by the docket certification | 42 | mostly a wrong closed reason in the report | **drop** |
+| 7b | Multi-unit or both WON and LOSS, label contradicts its own tally | 46 (27 also in 7a) | case-level outcome repeated on each unit's row | **drop** |
 | 8 | `union_won` ≠ vote majority (other rows) | ~200 | wrong vote counts in the NLRB's own data | **keep**, the label is confirmed |
 | 9 | More votes than eligible voters | 146 | `eligible` = 0 (71) or typos in counts / `eligible` | **keep rows, set `eligible` to missing** |
 | 10 | No valid votes (0–0) | 48 | tally never entered | **keep** |
@@ -61,16 +61,16 @@ tally agrees with the label, it matches `union_won` for 14,057 of 14,067 rows (9
 | 16 | No participants | 4 | not found by the scraper | **keep**, features stay missing |
 | 17 | Petition dated after the vote | 4 | docket upload date, not filing date | already set to missing |
 | 18 | Petition → election > 1 year | 113 | litigated or blocked cases | **keep** |
-| 19 | No petition date | 707 | the public docket doesn't list the petition | **keep**, feature stays missing |
+| 19 | No petition date | 706 | the public docket doesn't list the petition | **keep**, feature stays missing |
 
-**Status: all recommendations are applied in `src/preprocessmanual.py`.** 45 rows dropped
-(19 + 26), 33 labels corrected (19 to won, 14 to lost), `eligible` set to missing where it's 0
-or smaller than the votes cast (157 missing in the final data), and 97 election dates filled.
-`data/elections_clean.csv` now has **15,312 rows × 23 columns**. The script prints each of
-these counts when it runs.
+**Status: all recommendations are applied in `src/preprocessmanual.py`.** 87 rows dropped
+(61 with unclear labels + 26 with no election date), no labels changed, `eligible` set to
+missing where it's 0 or smaller than the votes cast (157 missing in the final data), and 97
+election dates filled. `data/elections_clean.csv` now has **15,270 rows × 23 columns**. The
+script prints each of these counts when it runs.
 
 The numbers in the sections below are from **before** these fixes (15,357 rows), so they
-describe the raw anomalies. After the fixes, `union_won` and the vote majority disagree on 190
+describe the raw anomalies. After the fixes, `union_won` and the vote majority disagree on 189
 rows instead of 240. Those are the wrong-tally rows in check 8, which are kept.
 
 ---
@@ -150,20 +150,22 @@ column printed in the same report.
 
 These turned out to be two different problems.
 
-### 7a. Wrong closed reason in the report (33 rows): fix the label
+### 7a. Docket disagrees with the closed reason (42 rows): drop
 
-**Rule:** the label comes from the closed reason. It is overruled only when the docket's
-certification (the live case record) disagrees **and** at least one other field on the same
-report row (the tally majority or the WON/LOSS column) agrees with the docket. The report's
-closed reason is then contradicted both by the live record and by another field in the report
-itself.
+**Rule:** the label comes from the closed reason. If the docket's certification (the live case
+record) says the opposite, the row is dropped. There's no attempt to work out which source is
+right.
+
+Most of these are a wrong closed reason in the report. In 33 of the 42, at least one other
+field on the same report row (the tally majority or the WON/LOSS column) agrees with the
+docket, so the closed reason is contradicted both by the live record and by the report itself.
 
 For 31-RC-140133, the docket has a Certification of Representative issued 12/16/2014, the
 same date the report gives as the closing date. So the document actually issued that day was
 a win certification.
 
-33 rows meet the rule: 27 of the "both" rows and 6 of the FY2012–13 rows. 19 become wins and
-14 become losses. None of them is a multi-unit case (7b).
+Those 33 are 27 of the "both" rows and 6 of the FY2012–13 rows; the docket says win for 19
+and loss for 14. The other 9 have no second source backing the docket.
 
 Verified on nlrb.gov:
 
@@ -183,11 +185,11 @@ say loss:
 | 01-RC-061968 | 6–14 | Representative | LOSS | Results |
 | 31-RC-087528 | 34–33 | Representative | LOSS | Results |
 
-**Decision:** **set `union_won` to the docket's value** for these 33. The other 9 rows where
-the docket disagrees with the label have no second source backing the docket, so the label
-stays.
+**Decision:** **drop all 42.** An earlier version set `union_won` to the docket's value for
+the 33 with a second source and kept the other 9. Dropping is simpler, loses only 0.3% of the
+data, and leaves the win rate unchanged (70.8%).
 
-### 7b. Multi-unit cases (19 rows): drop
+### 7b. Multi-unit or both WON and LOSS (46 rows): drop
 
 This is different from multi-**union**. Step 4 removed elections with more than one **union**
 on the ballot. A **unit** is a group of employees who vote separately, e.g. professionals and
@@ -211,12 +213,15 @@ another unit.
 One more "both" row, **32-RC-297724** (3–11 tally, closed Representative, no docket), can't be
 settled either way.
 
-**Decision:** **drop these 19.** Keep the other 72 multi-unit rows, where the case-level label
-and the unit's own tally agree.
+The rows marked both WON and LOSS have the same problem: the report contradicts itself, so
+the label can't be trusted when it also contradicts the tally.
 
-Note on the "both" rows: I first read all 34 "both" rows that contradict their tally as
-multi-unit. Only 6 have any evidence of a second unit. The other 27 are the wrong-closed-reason
-rows in 7a, and 1 is unresolved.
+**Decision:** **drop the 46 multi-unit or "both" rows whose label contradicts their own
+tally.** 27 of them are also in 7a, so 7a and 7b together drop 61 rows. Keep the other
+multi-unit and "both" rows, where the label and the tally agree.
+
+Note on the "both" rows: 34 "both" rows contradict their tally. Only 6 have any evidence of a
+second unit. The other 27 are the wrong-closed-reason rows in 7a, and 1 is unresolved.
 
 ## 8. `union_won` vs the vote majority
 
@@ -224,8 +229,8 @@ rows in 7a, and 1 is unresolved.
 a tie is a loss).
 
 **Result:** 240 disagree: 170 "lost with a majority for" and 70 "won without a majority". 34 of
-these are the "both" rows covered in check 7. The other 206 (a handful of them also get
-relabelled by the 7a rule):
+these are the "both" rows covered in check 7. The other 206 (a handful of them are also
+dropped by the 7a rule):
 
 ### Lost even though the tally shows a majority for (150 rows)
 
@@ -375,7 +380,7 @@ nothing is done with these rows, the printout was removed from the script.
 ## 16. No participants
 
 **What it checks:** elections whose case wasn't found in the scraped participants file. The
-script prints "participants found for 15308 of 15312 elections".
+script prints "participants found for 15266 of 15270 elections".
 
 **Result:** 4 cases: 19-RC-067978, 02-RC-069853, 34-RC-084177, 24-RC-089605 (all 2011–2012).
 They're also missing from the docket.
@@ -418,11 +423,11 @@ models), handle it in feature engineering (cap or log), not by dropping rows.
 **What it checks:** elections with no petition date, so `days_petition_to_election` is missing.
 The script prints how many petition dates it found and where each came from.
 
-**Result:** 14,605 of 15,312 have one: 14,452 from the docket, 153 from the report's file date
+**Result:** 14,564 of 15,270 have one: 14,413 from the docket, 151 from the report's file date
 (early reports only). Where both exist, they're the same day 86% of the time and within 3 days
 99%.
 
-The other **707** all have a docket, and it's complete (none hit the old 10-document limit),
+The other **706** all have a docket, and it's complete (none hit the old 10-document limit),
 but it never lists a petition. These dockets are short (median 4 documents), and the earliest
 is usually the Stipulated Election Agreement, a median 19 days before the vote. The NLRB's
 public docket doesn't list every document, so re-scraping can't recover these. They're spread
@@ -439,14 +444,14 @@ pipeline.
 
 - **The label is trustworthy, the vote counts aren't.** `union_won` (from the closed reason)
   agrees with the docket certification for 14,236 of the 14,278 elections that have exactly one
-  kind of certification (99.7%). 33 of the 42 disagreements are wrong closed reasons that the
-  rule in 7a fixes. The vote counts, and sometimes `eligible`, have typos in the NLRB's own
+  kind of certification (99.7%). The 42 disagreements, mostly wrong closed reasons, are
+  dropped (7a). The vote counts, and sometimes `eligible`, have typos in the NLRB's own
   records. Some are confirmed on nlrb.gov, and some are clustered in particular regional
   offices. That supports labelling from the case closing rather than the tally, and not using
   vote counts at all.
-- **Two real label problems, both small.** 33 rows have a wrong closed reason in the report;
-  two other sources agree on the correct one, so it's fixed (7a). 19 rows are units in
-  multi-unit cases whose case-level label contradicts the unit's own vote; there's no reliable
-  way to tell which unit the label belongs to, so they're dropped (7b).
+- **Two real label problems, both small.** Some rows have a closed reason the docket
+  contradicts (7a), and some are units in multi-unit cases, or rows marked both WON and LOSS,
+  whose label contradicts the unit's own vote (7b). Rather than guess which source is right,
+  all 61 are dropped (0.4% of the data, win rate unchanged).
 - **Everything else is kept.** Long, contested cases look odd but are real, and dropping them
   would bias the sample toward easy elections.
