@@ -38,7 +38,7 @@ WAIT = 1  # seconds between requests, so we don't hammer the NLRB site
 HEADERS = {"User-Agent": "DATA1030 class project"}
 
 
-# =============================================================== 1. download
+#1. download
 
 def fetch(url, tries=3):
     """GET a url, retrying a couple of times if the connection drops."""
@@ -100,7 +100,7 @@ def download_all():
         print("\n".join("  " + u for u in failed))
 
 
-# ======================================================= 2a. read the tables
+#2. read the tables
 
 CASE_NO = r"\d{2}-[A-Z]{2}-\d{5,6}"  # e.g. 01-RD-386098
 
@@ -119,7 +119,7 @@ def add_leftover(row, leftover):
 
 
 def read_tables(pdf, source):
-    """Main method: read the election rows out of the PDF's tables.
+    """read the election rows out of the PDF's tables.
 
     Page breaks cause three problems, handled below:
       - a table continuing on a new page doesn't always repeat its header
@@ -183,7 +183,7 @@ def read_tables(pdf, source):
     return rows
 
 
-# ================================================ 2b. backup: read line by line
+#2. backup: read line by line
 # Only used when pdfplumber finds no tables in a PDF. Every election row has a
 # case number, so we find those lines and split them up with regexes.
 #
@@ -300,7 +300,7 @@ def read_text(pdf, source):
     return rows, unparsed
 
 
-# ======================================================== 3. write the CSVs
+#3. write the CSVs
 
 def write_csv(rows, path, columns=None):
     if columns is None:
