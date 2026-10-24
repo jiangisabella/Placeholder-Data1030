@@ -378,14 +378,13 @@ an election can't happen after its case closed. these are typos in the
 PDF (one has 05/08/2102), so treat them as missing dates, corrected by docket data
 """
 after_close = df["election_date"] > df["closed_date"]
-bad_dates = df.loc[after_close, "election_date"].dt.date.tolist()
-print(f"\nelection date after the case closed (set to missing): {after_close.sum()} {bad_dates}")
+print(f"\nelection date after the case closed (set to missing): {after_close.sum()}")
+print(df.loc[after_close, ["case_number", "election_date", "closed_date"]])
 df.loc[after_close, "election_date"] = pd.NaT
 
 """
-missing election dates (mostly blank in the PDF): use the first Tally of
-Ballots in the docket, which for most elections is the day of the vote
-(median 0 days). rows with no tally can't be placed in time, so dropped
+missing election dates, use the first Tally of Ballots in the docket, which for most elections is the day of the vote
+(median 0 days). 
 """
 no_date = df["election_date"].isna()
 tally = df["case_number"].map(first_tally)
@@ -411,60 +410,104 @@ Adding new features
 - employer : case_name  cleaned
 """
 
-CENSUS_REGION = {}
-for region, states in {
-    "Northeast": "CT ME MA NH RI VT NJ NY PA",
-    "Midwest": "IL IN MI OH WI IA KS MN MO NE ND SD",
-    "South": "DE DC FL GA MD NC SC VA WV AL KY MS TN AR LA OK TX",
-    "West": "AZ CO ID MT NV NM UT WY AK CA HI OR WA",
-    "Territory": "PR GU VI AS MP",
-}.items():
-    for st in states.split():
-        CENSUS_REGION[st] = region
+CENSUS_REGIONS = {
+    "Northeast": ["CT", "ME", "MA", "NH", "RI", "VT", "NJ", "NY", "PA"],
+    "Midwest":   ["IL", "IN", "MI", "OH", "WI", "IA", "KS", "MN", "MO", "NE", "ND", "SD"],
+    "South":     ["DE", "DC", "FL", "GA", "MD", "NC", "SC", "VA", "WV",
+                  "AL", "KY", "MS", "TN", "AR", "LA", "OK", "TX"],
+    "West":      ["AZ", "CO", "ID", "MT", "NV", "NM", "UT", "WY",
+                  "AK", "CA", "HI", "OR", "WA"],
+    "Territory": ["PR", "GU", "VI", "AS", "MP"],
+}
+
+# flip it to state -> region so .map can look up each row's state
+STATE_TO_REGION = {}
+for region, states in CENSUS_REGIONS.items():
+    for st in states:
+        STATE_TO_REGION[st] = region
 
 df["state"] = df["state"].str.upper()
-df["census_region"] = df["state"].map(CENSUS_REGION).fillna("Unknown")
+df["census_region"] = df["state"].map(STATE_TO_REGION).fillna("Unknown")
 print(f"\nstates with no census region: {df.loc[df['census_region'] == 'Unknown', 'state'].value_counts().to_dict()}")
 
 """
-parent union by keyword.
-(Workers United is SEIU-affiliated but kept on its own)
+parent union by keyword. the first pattern that matches wins, so the order matters
+(e.g. CWA before Workers United, IAM before SMART for joint locals).
+(Workers United is SEIU-affiliated and RWDSU is UFCW-affiliated, but both are kept on their own)
+only parents with about 50+ elections get their own group, smaller ones stay "Other"
 """
 PARENT_UNION = [
+    ("CWA", r"communications? workers|\bcwa\b|news ?guild|newspaper guild"),
     ("Workers United", r"workers united"),
-    ("Teamsters", r"teamster|\bibt\b"),
-    ("SEIU", r"\bseiu\b|service employees|1199"),
-    ("UFCW", r"\bufcw\b|food (?:and|&) commercial"),
-    ("IBEW", r"\bibew\b|electrical workers"),
-    ("IAM", r"machinists|\biam\b"),
-    ("USW", r"steelworkers|steel, paper|\busw\b"),
-    ("UAW", r"\buaw\b|automobile"),
-    ("CWA", r"communications? workers|\bcwa\b"),
-    ("IUOE", r"operating engineers|\biuoe\b"),
+    ("SEIU", r"service employees|seiu|1199"),
+    ("RWDSU", r"retail,? wholesale|\brwdsu\b"),
+    ("UFCW", r"food (?:and|&) commercial|\bufcw\b"),
+    ("IAM", r"machinists|\biam(?:aw)?\b"),
+    # industrial / transport
+    ("Teamsters", r"teamster|\bibt\b|chauffeurs|warehousemen"),
+    ("USW", r"steel ?workers|united steel|\busw\b"),
+    ("UAW", r"automobile|\buaw\b"),
+    ("IBEW", r"electrical workers|\bibew\b"),
+    ("IUOE", r"operating engineers|stationary engineers|\biuoe\b"),
+    ("BCTGM", r"bakery|confectionery|grain millers|\bbctgm\b"),
+    ("ATU", r"amalgamated transit|\batu\b"),
+    ("TWU", r"transport workers"),
+    ("UWUA", r"utility workers|utilities workers|\buwua\b"),
+    ("ILWU", r"longshore (?:and|&) warehouse|\bilwu\b"),
+    # building trades
     ("LIUNA", r"laborers|\bliuna\b"),
-    ("AFSCME", r"afscme|state,? county"),
-    ("SPFPA", r"spfpa|security,? police"),
-    ("UNITE HERE", r"unite here"),
-    ("AFT", r"\baft\b|federation of teachers"),
-    ("Nurses", r"nurse"),
     ("Carpenters", r"carpenters"),
-    ("IUPAT", r"painters"),
+    ("UA (Plumbers)", r"plumbers|pipefitters|steamfitters|sprinkler fitters|united association|\bua\b"),
+    ("Ironworkers", r"iron ?workers|bridge,? structural"),
+    ("SMART", r"sheet metal|\bsmart\b"),
+    ("IUPAT", r"painters|\biupat\b"),
+    # public sector / professional / health
+    ("AFSCME", r"state,? county|\bafscme\b"),
+    ("AFT", r"federation of teachers|\baft\b"),
+    ("Nurses", r"nurse"),
+    ("OPEIU", r"office (?:and|&) professional|\bopeiu\b"),
+    ("IAFF", r"fire ?fighters|\biaff\b"),
+    # hospitality / entertainment
+    ("UNITE HERE", r"unite here|hotel employees"),
+    ("IATSE", r"theatrical stage|\biatse\b"),
+    # security / guards
+    ("SPFPA", r"security,? police|\bspfpa\b"),
+    ("UGSOA", r"government security officers|\bugsoa\b"),
+    ("NATCA", r"air traffic controllers|\bnatca\b"),
 ]
 union_lower = df["union_name"].str.lower()
 df["parent_union"] = "Other"
 for name, pattern in reversed(PARENT_UNION):   # reversed so the first match is written last
     df.loc[union_lower.str.contains(pattern, regex=True), "parent_union"] = name
+# "** Data Incomplete **" is a placeholder in the PDF, not a union
+df.loc[union_lower.str.contains("data incomplete"), "parent_union"] = "Unknown"
 print(f"\n{df['parent_union'].value_counts().to_dict()}")
 
 """
-employer name for grouping: 
-lowercase, nothing after d/b/a, no punctuation, no inc/llc/corp
+employer name for grouping:
+- lowercase
+- nothing after d/b/a, a/k/a, f/k/a, "as agent of", "on behalf of"
+  (Hyatt as agent of Airport Plaza Hotel -> hyatt)
+- no notes in brackets: "(Joint Employer)", "(PAE)"
+- & -> and, no punctuation
+- no inc/llc/corp/u.s. at the end, no "the" at the start
 """
-SUFFIXES = r"\b(inc|incorporated|llc|l l c|corp|corporation|co|company|ltd|lp|llp|pc|pllc|the)\b"
-emp = df["case_name"].str.lower()
-emp = emp.str.split(r"\s+(?:d/b/a|dba|d\.b\.a\.|t/a)\s+", regex=True).str[0]
-emp = emp.str.replace(r"[^a-z0-9 ]", " ", regex=True).str.replace(SUFFIXES, " ", regex=True)
-df["employer"] = emp.str.split().str.join(" ")
+ALIAS_SPLIT = (r"\s+(?:d/?b/?a|d\.b\.a\.?|a/?k/?a|f/?k/?a|t/a|doing business as|formerly known as"
+               r"|as agent (?:of|for)|on behalf of)\b")
+SUFFIXES = (r"inc|incorporated|corp|corporation|co|company|companies|llc|l l c|llp|l l p|lp|l p"
+            r"|ltd|limited|pllc|pc|p c|plc|na|n a|usa|us|u s")
+TRAILING_SUFFIX = rf"(?:\s+(?:{SUFFIXES}))+$"   # one or more suffixes at the end
+
+emp = df["case_name"].fillna("").str.lower()
+emp = emp.str.split(ALIAS_SPLIT, n=1, regex=True).str[0]
+emp = emp.str.replace(r"\([^)]*\)", " ", regex=True)
+emp = emp.str.replace("&", " and ").str.replace("'", "")    # mcdonald's -> mcdonalds
+emp = emp.str.replace(r"[^a-z0-9 ]", " ", regex=True)
+emp = emp.str.split().str.join(" ")
+emp = emp.str.replace(TRAILING_SUFFIX, "", regex=True)
+emp = emp.str.replace(r"^the ", "", regex=True)
+df["employer"] = emp
+print(f"\nemployers: {df['employer'].nunique()} distinct, {(df['employer'] == '').sum()} blank")
 
 
 # %%
@@ -479,8 +522,6 @@ Columns:
   split over lines:
     party \\n type \\n name \\n organization
     e.g. "Employer\\nLegal Representative\\nBLOOM, HOWARD\\nJackson Lewis, P.C."
-  some rows are shorter ("Employer\\nEmployer\\nDELTA PROJECTS, INC.")
-
 Cleaning:
 - exact duplicate rows dropped
 - participant_raw_text split into its lines:
@@ -498,23 +539,23 @@ Making (one row per case, then merged onto the elections):
 
 """
 
-parts = pd.read_csv(PARTICIPANTS_CSV, dtype=str).drop_duplicates()
+participants = pd.read_csv(PARTICIPANTS_CSV, dtype=str).drop_duplicates()
 
 # split the raw text into its lines (a missing line becomes "")
-lines = parts["participant_raw_text"].fillna("").str.split("\n")
-parts["party"] = lines.str[0]
-parts["ptype"] = lines.str[1].fillna("")
-parts["org"] = lines.str[3].fillna("")
+lines = participants["participant_raw_text"].fillna("").str.split("\n")
+participants["party"] = lines.str[0]
+participants["ptype"] = lines.str[1].fillna("")
+participants["org"] = lines.str[3].fillna("")
 
 # flags for each participant row
-is_lawyer = parts["ptype"] == "Legal Representative"
-parts["emp_lawyer"] = is_lawyer & (parts["party"] == "Employer")
-parts["pet_lawyer"] = is_lawyer & (parts["party"] == "Petitioner")
-parts["intervenor"] = parts["party"] == "Intervenor"
+is_lawyer = participants["ptype"] == "Legal Representative"
+participants["emp_lawyer"] = is_lawyer & (participants["party"] == "Employer")
+participants["pet_lawyer"] = is_lawyer & (participants["party"] == "Petitioner")
+participants["intervenor"] = participants["party"] == "Intervenor"
 
 # the employer lawyer's firm, blank for everyone else
-parts["emp_firm"] = ""
-parts.loc[parts["emp_lawyer"], "emp_firm"] = parts["org"]
+participants["emp_firm"] = ""
+participants.loc[participants["emp_lawyer"], "emp_firm"] = participants["org"]
 
 def list_firms(firms):
     # every firm the employer's lawyers come from, joined with "; " since
@@ -524,7 +565,7 @@ def list_firms(firms):
 
 
 # one row per case
-by_case = parts.groupby("case_number")
+by_case = participants.groupby("case_number")
 case_parts = pd.DataFrame()
 case_parts["n_participants"] = by_case.size()
 case_parts["n_employer_lawyers"] = by_case["emp_lawyer"].sum()
@@ -600,7 +641,10 @@ KEEP = [
     "union_won",
 ]
 # make sure no column was forgotten or left over
-assert set(KEEP) == set(df.columns), set(KEEP) ^ set(df.columns)
+missing = set(KEEP) - set(df.columns)     # in KEEP but not in df
+extra = set(df.columns) - set(KEEP)       # in df but not in KEEP
+if missing or extra:
+    raise ValueError(f"KEEP doesn't match the columns. missing: {missing}, extra: {extra}")
 
 clean = df[KEEP]
 clean = clean.sort_values(["election_date", "case_number"])

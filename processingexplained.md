@@ -148,9 +148,19 @@ on nlrb.gov by `src/docket_scraping.py`)
 
 **Step 8: Features from the report columns**
 - **Add** `census_region`: `state` mapped to Northeast, Midwest, South, West or Territory.
-- **Add** `parent_union`: `union_name` matched to its parent union, e.g. "Teamsters Local
-  340" → Teamsters.
-- **Add** `employer`: `case_name` cleaned (lowercase, no "Inc"/"LLC", nothing after d/b/a).
+- **Add** `parent_union`: `union_name` matched to its parent union by keyword, e.g. "Teamsters
+  Local 340" → Teamsters. The raw names have 7,983 spellings, so they need grouping.
+  - 32 parent unions with about 50 or more elections each get their own group. The first
+    pattern that matches wins, so the order in `PARENT_UNION` matters (e.g. CWA before Workers
+    United).
+  - Workers United (SEIU-affiliated) and RWDSU (UFCW-affiliated) are kept as their own groups.
+  - Smaller and independent unions are `"Other"` (1,796 elections, 12%). The largest are the
+    National Union of Healthcare Workers (about 80) and the Boilermakers (41).
+  - 11 rows whose union name is the PDF placeholder `"** Data Incomplete **"` are `"Unknown"`.
+- **Add** `employer`: `case_name` cleaned: lowercase; nothing after d/b/a, a/k/a, "as agent
+  of" or "on behalf of" (so "Hyatt as agent of Airport Plaza Hotel" → hyatt); no notes in
+  brackets; "&" → "and"; no punctuation; no "Inc"/"LLC"/"U.S." at the end, and no "The" at the
+  start. That gives 9,471 distinct employers.
   It's not a feature, it's the grouping key for GroupKFold, so the same employer (e.g. the
   726 Starbucks elections) doesn't end up in both training and validation folds.
 
