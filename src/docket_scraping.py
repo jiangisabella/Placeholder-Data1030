@@ -23,7 +23,7 @@ from bs4 import BeautifulSoup
 
 
 INPUT_DIR = Path("data/raw_csvs")
-OUTPUT_DIR = Path("data/scraper_csvs")
+OUTPUT_DIR = Path("data/raw_csvs/scraper_csvs")
 MAX_CASES = None
 REQUEST_DELAY = 0.5
 
