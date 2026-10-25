@@ -156,8 +156,9 @@ Dropping columns:
 - region_offices (NLRB office codes, not used)
 - case id, internal data, unusable
 - columns known only after vote ends
+- case_type, every row is RC now
 """
-df = df.drop(columns=["region_offices", "case_id", "page", "union_to_certify"])
+df = df.drop(columns=["region_offices", "case_id", "page", "union_to_certify", "case_type"])
 
 
 # %%
@@ -608,6 +609,8 @@ df = df.merge(petition_date, on="case_number", how="left")
 petition_from_docket = df["petition_date"].notna()
 df["petition_date"] = df["petition_date"].fillna(df["file_date"])
 petition_from_report = df["petition_date"].notna() & ~petition_from_docket
+# file_date is folded into petition_date, not needed on its own
+df = df.drop(columns=["file_date"])
 
 # days from petition to election. a petition after the vote is a bad date
 df["days_petition_to_election"] = (df["election_date"] - df["petition_date"]).dt.days
@@ -627,10 +630,10 @@ except the target
 """
 KEEP = [
     # ids / bookkeeping
-    "fiscal_year", "case_number", "case_type",
+    "fiscal_year", "case_number",
     # from the reports
     "case_name", "employer", "city", "state", "census_region",
-    "union_name", "parent_union", "eligible", "file_date", "election_date",
+    "union_name", "parent_union", "eligible", "election_date",
     # participants
     "n_participants", "employer_has_lawyer", "n_employer_lawyers",
     "employer_law_firms", "petitioner_has_lawyer", "n_petitioner_lawyers",

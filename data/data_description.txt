@@ -1,4 +1,4 @@
-elections_clean.csv: one row per single-union RC election, 15,270 rows x 23 columns.
+elections_clean.csv: one row per single-union RC election, 15,270 rows x 21 columns.
 
 fiscal_year: (ordinal) NLRB fiscal year of the monthly report the election appears in. 
 A fiscal year runs from October to September (FY2012 = Oct 2011 - Sep 2012). 
@@ -15,11 +15,6 @@ format: region-case type-number (*)
 
 	01-RC-216927
 	...
-
-
-case_type: (categorical) type of NLRB representation case (*)
-
-	RC	workers petition to certify a union
 
 
 case_name: (categorical) a unique descriptor assigned by NLRB to identify each election case (*)
@@ -91,7 +86,7 @@ eligible: (continuous) count of eligible voters in a union election
 
 
 petition_date (yyyy-mm-dd): earliest date on which the union election is petitioned to the NLRB. 
-file_date if the docket lists none. (*)
+If the docket lists none, the case file date from the monthly report is used instead. (*)
 
 
 election_date (yyyy-mm-dd): date on which the union election takes place. 
