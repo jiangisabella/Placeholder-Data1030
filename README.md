@@ -21,7 +21,7 @@ All data comes from the National Labor Relations Board (NLRB):
 - Case docket pages: https://www.nlrb.gov/search/case
 
 The cleaned dataset, `data/elections_clean.csv`, has 15,270 single-union RC elections
-(FY2012–FY2026) and 23 columns. The target is `union_won` (1 = union won, 0 = lost).
+(FY2012–FY2026) and 21 columns. The target is `union_won` (1 = union won, 0 = lost).
 - Column descriptions: `data/data_description.md`
 - How the cleaning works, step by step: `processingexplained.md`
 - What each data check found: `data/data_checks.md`
