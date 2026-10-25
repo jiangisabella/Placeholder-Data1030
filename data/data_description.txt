@@ -1,4 +1,8 @@
-fiscal_year: the year the union election takes place
+elections_clean.csv: one row per single-union RC election, 15,270 rows x 23 columns.
+
+fiscal_year: (ordinal) NLRB fiscal year of the monthly report the election appears in. 
+A fiscal year runs from October to September (FY2012 = Oct 2011 - Sep 2012). 
+Ordered from earliest to latest.
 
 	2012
 	2013
@@ -6,19 +10,27 @@ fiscal_year: the year the union election takes place
 	2026
 
 
-case_number: a unique string assigned by NLRB to identify each election case (*)
+case_number: (categorical) a unique string assigned by NLRB to identify each election case. 
+format: region-case type-number (*)
+
+	01-RC-216927
+	...
 
 
-case_name: a unique descriptor assigned by NLRB to identify each election case (*)
+case_type: (categorical) type of NLRB representation case (*)
+
+	RC	workers petition to certify a union
 
 
-employer: the employer of which the union election takes place (*)
+case_name: (categorical) a unique descriptor assigned by NLRB to identify each election case (*)
 
 
-city: the city in which the union election takes place (*)
+employer: (categorical) the employer of which the union election takes place (*)
 
 
-state: the state in which the union election takes place
+city: (categorical) the city in which the union election takes place (*)
+
+state: (categorical) the state in which the union election takes place
 
 	AL   alabama
 	AK   alaska
@@ -27,85 +39,102 @@ state: the state in which the union election takes place
 	WY   wyoming
 
 
-census_region: groups states into four geographic regions according to census conventions
+census_region: (categorical) groups states into four geographic regions according to  U.S. Census Bureau conventions
 
 	Northeast
 	Midwest
 	South
 	West
+	Territory
+
+union_name: (categorical) name of union that the election is voted under (*)
 
 
-union_name: name of union that the election is voted under (*)
+parent_union: (categorical) parent union that the election union is part of
+
+	Teamsters	International Brotherhood of Teamsters
+	SEIU		Service Employees International Union, incl. 1199 locals
+	IAM		International Association of Machinists and Aerospace Workers
+	IUOE		International Union of Operating Engineers
+	UFCW		United Food and Commercial Workers
+	IBEW		International Brotherhood of Electrical Workers
+	Workers United	Workers United (SEIU affiliate, kept as its own group)
+	USW		United Steelworkers
+	CWA		Communications Workers of America, incl. NewsGuild
+	SPFPA		Security, Police and Fire Professionals of America
+	UAW		United Auto Workers
+	LIUNA		Laborers' International Union of North America
+	AFSCME		American Federation of State, County and Municipal Employees
+	Nurses		any union with "nurse" in its name
+	IATSE		International Alliance of Theatrical Stage Employees
+	UA (Plumbers)	United Association of plumbers, pipefitters and sprinkler fitters
+	ATU		Amalgamated Transit Union
+	UNITE HERE	UNITE HERE (hotel and food service workers)
+	RWDSU		Retail, Wholesale and Department Store Union (UFCW affiliate, kept as its own group)
+	SMART		Sheet Metal, Air, Rail and Transportation Workers
+	AFT		American Federation of Teachers
+	OPEIU		Office and Professional Employees International Union
+	UGSOA		United Government Security Officers of America
+	IUPAT		International Union of Painters and Allied Trades
+	BCTGM		Bakery, Confectionery, Tobacco Workers and Grain Millers
+	Carpenters	United Brotherhood of Carpenters
+	UWUA		Utility Workers Union of America
+	IAFF		International Association of Fire Fighters
+	ILWU		International Longshore and Warehouse Union
+	NATCA		National Air Traffic Controllers Association
+	Ironworkers	International Association of Ironworkers
+	TWU		Transport Workers Union
+	Other		smaller and independent unions
 
 
-parent_union: parent union that the election union is part of
-
-	Teamsters    
-	SEIU
-	UFCW
-	IBEW
-	IAM
-	USW
-	UAW
-	CWA
-	IUOE
-	LIUNA
-	AFSCME
-	SPFPA
-	UNITE HERE
-	AFT
-	Nurses
-	Carpenters
-	IUPAT
-	Other
+eligible: (continuous) count of eligible voters in a union election
 
 
-eligible: count of eligible voters in a union election
+petition_date (yyyy-mm-dd): earliest date on which the union election is petitioned to the NLRB. 
+file_date if the docket lists none. (*)
 
 
-petition_date (yyyy-mm-dd): date on which the union election is petitioned to the NLRB (*)
+election_date (yyyy-mm-dd): date on which the union election takes place. 
+Where the report left it blank, it is filled from the docket's first Tally of Ballots (*)
 
 
-election_date (yyyy-mm-dd): date on which the union election takes place (*)
+days_petition_to_election: (continuous) duration between election date and petition date, counted in days
 
 
-days_petition_to_election: duration between election date and petition date, counted in days
+n_participants: (continuous) number of parties and representatives who participated in the case (employer, union, lawyers, intervenors)
 
 
-n_participants: count of voters who participated in the election
-
-
-employer_has_lawyer: whether the employer is supported by lawyers against the election
+employer_has_lawyer: (binary categorical) whether the employer is supported by lawyers against the election
 
 	1  the employer has lawyers
 	0  the employer doesn't have lawyers
 
 
-n_employer_lawyers: number of lawyers the employer has against the election
+n_employer_lawyers: (continuous) number of lawyers the employer has against the election
 
 
-employer_law_firms: names of the employers' lawyers' law firms (&)
+employer_law_firms: (categorical) names of the employers' lawyers' law firms. Several values, separated by ;.
 
 
-petitioner_has_lawyer: whether the union is supported by lawyers for the election
+petitioner_has_lawyer: (binary categorical) whether the union (petitioner) is supported by lawyers for the election
 
 	1  union supported by lawyers
 	0  unions not supported by lawyers
 
 
-n_petitioner_lawyers: number of lawyers the union has for the election
+n_petitioner_lawyers: (continuous) number of lawyers the union has for the election, as a count
 
 
-has_intervenor: describes the presence of intervenors during the election
+has_intervenor: (binary categorical)  describes the presence of intervenors during the election
 
 	1  has intervenors
 	0  does not have intervenors
 
 
-union_won: describes the union election result based on vote counts
+union_won: (binary categorical) [Target variable] describes the final official union election result based on vote counts
 
-	1 	win; more than 50% of voters are for the union
-    0 	lose; more than 50% of voters are against the union
+	1	win: Certification of Representative issued
+	0	loss: Certification of Results issued
 
 
 (*) are desriptive variables that will likely not be used in the ML pipeline
