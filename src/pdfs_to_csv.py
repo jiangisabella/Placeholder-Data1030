@@ -1,17 +1,8 @@
 """
 Download the NLRB monthly election reports (FY2012 onward) and turn each PDF
-into a raw CSV. Values are copied as-is; cleaning is a separate step
-(see cleaning_plan.md).
-
-    python src/pdfs_to_csv.py
-
-Change DOWNLOAD / REDO_CSVS below to pick what runs. Anything already on
-disk is skipped, so it's safe to stop and rerun.
-
-Output:
-    data/raw_pdfs/<FY>/*.pdf     downloaded reports
-    data/raw_csvs/<FY>/*.csv     one CSV per report
-    data/skipped_pdfs.txt        reports with no tables (image-only PDFs) or no elections
+into a raw CSV, values copied as-is. Anything already on disk is skipped, so
+it's safe to stop and rerun. Reports with no tables (image-only PDFs) or no
+elections are listed in data/skipped_pdfs.txt.
 """
 
 import csv
@@ -25,41 +16,29 @@ import requests
 from bs4 import BeautifulSoup
 
 
-# Configuration
-
-DATA_DIR = Path("data")
-PDF_DIR = DATA_DIR / "raw_pdfs"
-CSV_DIR = DATA_DIR / "raw_csvs"
-SKIPPED_FILE = DATA_DIR / "skipped_pdfs.txt"
+PDF_DIR = Path("data/raw_pdfs")
+CSV_DIR = Path("data/raw_csvs")
+SKIPPED_FILE = Path("data/skipped_pdfs.txt")
+DOWNLOAD = True    # False = only convert PDFs already on disk
+REDO_CSVS = False  # True = rebuild CSVs that already exist
+REQUEST_DELAY = 1
 
 INDEX_URL = "https://www.nlrb.gov/reports/agency-performance/election-reports"
 FIRST_FY = 2012  # FY2012 = Oct 2011 to Sep 2012
 
-DOWNLOAD = True    # False = only convert PDFs already on disk
-REDO_CSVS = False  # True = rebuild CSVs that already exist
-REQUEST_DELAY = 1  # seconds between requests
-
-HEADERS = {
-    "User-Agent": "DATA1030 student research project"
-}
+CASE_RE = re.compile(r"\d{2}-[A-Z]{2}-\d{5,6}")  # e.g. 01-RD-386098
 
 
-# 1. Download the PDFs
-
-def get_page(url, session):
-    response = session.get(url, headers=HEADERS, timeout=60)
-
-    if response.status_code in (403, 429):
-        raise RuntimeError(f"Access restricted: HTTP {response.status_code}")
-
+def get_page(session, url):
+    response = session.get(url, timeout=60)
     response.raise_for_status()
     time.sleep(REQUEST_DELAY)
     return response
 
 
-def find_links(url, session):
+def find_links(session, url):
     # every link on the page as a full url, in page order, no repeats
-    soup = BeautifulSoup(get_page(url, session).text, "html.parser")
+    soup = BeautifulSoup(get_page(session, url).text, "html.parser")
 
     links = []
     for a in soup.find_all("a", href=True):
@@ -75,7 +54,7 @@ def is_pdf(url):
 
 def download_all():
     with requests.Session() as session:
-        index_links = find_links(INDEX_URL, session)
+        index_links = find_links(session, INDEX_URL)
 
         # PDFs linked straight from the index are the yearly summaries, not monthly reports
         summary_pdfs = [link for link in index_links if is_pdf(link)]
@@ -90,70 +69,61 @@ def download_all():
                     year_pages.append(page)
         print(f"{len(year_pages)} fiscal years to check")
 
-        failed = []
-        try:
-            for fy, page_url in year_pages:
-                for pdf_url in find_links(page_url, session):
-                    name = pdf_url.split("/")[-1]
-                    path = PDF_DIR / fy / name
+        for fy, page_url in year_pages:
+            for pdf_url in find_links(session, page_url):
+                name = pdf_url.split("/")[-1]
+                path = PDF_DIR / fy / name
 
-                    # skip non-PDFs, the yearly totals, and anything already downloaded
-                    if not is_pdf(pdf_url) or pdf_url in summary_pdfs:
-                        continue
-                    if "total" in name.lower() or path.exists():
-                        continue
+                # skip non-PDFs, the yearly totals, and anything already downloaded
+                if not is_pdf(pdf_url) or pdf_url in summary_pdfs:
+                    continue
+                if "total" in name.lower() or path.exists():
+                    continue
 
-                    try:
-                        content = get_page(pdf_url, session).content
-                    except requests.RequestException as error:
-                        print(f"  Failed: {fy}/{name} ({error})")
-                        failed.append(pdf_url)
-                        continue
+                try:
+                    content = get_page(session, pdf_url).content
+                except requests.RequestException as error:
+                    print(f"  {fy}/{name}: failed ({error}), run again to retry")
 
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_bytes(content)
-                    print(f"  got {fy}/{name}")
+                    if (
+                        isinstance(error, requests.HTTPError)
+                        and error.response is not None
+                    ):
+                        status = error.response.status_code
 
-        except RuntimeError as error:
-            print(f"Stopped: {error}")
+                        if status in (403, 429) or status >= 500:
+                            print("Stopping due to a possible website error.")
+                            return
+                    continue
 
-    if failed:
-        print(f"\n{len(failed)} downloads failed, run again to retry:")
-        for url in failed:
-            print("  " + url)
-
-
-# 2. Read the tables in each PDF
-
-CASE_NO = r"\d{2}-[A-Z]{2}-\d{5,6}"  # e.g. 01-RD-386098
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(content)
+                print(f"  got {fy}/{name}")
 
 
 def clean_cell(cell):
-    """Text that wraps inside a cell comes back with newlines; flatten it."""
+    # text that wraps inside a cell comes back with newlines, flatten it
     return " ".join(cell.split()) if cell else ""
 
 
 def add_leftover(row, leftover):
-    """Glue the tail of a row that a page break cut off back onto the row.
-    Section titles like "NLRB Elections with 3 Labor Organizations" are ignored."""
+    # glue the tail of a row that a page break cut off back onto the row.
+    # section titles like "NLRB Elections with 3 Labor Organizations" are ignored
     for col, text in leftover.items():
         if text and col != "Case Number" and not text.startswith("NLRB Elections"):
             row[col] = f"{row.get(col, '')} {text}".strip()
 
 
 def read_tables(pdf, source):
-    """read the election rows out of the PDF's tables.
-
-    Page breaks cause three problems, handled below:
-      - a table continuing on a new page doesn't always repeat its header
-        -> reuse the previous table's header
-      - the header itself can be split across the break
-        -> merge the two halves (cut_header)
-      - a row can be split across the break; the leftover at the top of the
-        next page has no case number -> glue it onto the last row read.
-        Tables don't always come out in page order, so the last row is
-        looked up by table width (number of columns).
-    """
+    # Page breaks cause three problems, handled below:
+    #  - a table continuing on a new page doesn't always repeat its header
+    #    -> reuse the previous table's header
+    #  - the header itself can be split across the break
+    #    -> merge the two halves (cut_header)
+    #  - a row can be split across the break; the leftover at the top of the
+    #    next page has no case number -> glue it onto the last row read.
+    #    Tables don't always come out in page order, so the last row is
+    #    looked up by table width (number of columns).
     rows = []
     last_header = None      # header of the previous table
     cut_header = None       # previous table was only a header, with no rows
@@ -170,7 +140,7 @@ def read_tables(pdf, source):
 
             for cells in table:
                 cells = [clean_cell(c) for c in cells]
-                has_case_no = re.search(CASE_NO, " ".join(cells))
+                has_case_no = CASE_RE.search(" ".join(cells))
 
                 # the summary table at the top of each report has no "Case Number"
                 # column, so it never gets a header and is skipped
@@ -189,7 +159,7 @@ def read_tables(pdf, source):
                     under_header += 1
 
                 row = dict(zip(header, cells))
-                if re.fullmatch(CASE_NO, row.get("Case Number", "")):  # .get: a merged header can rename it
+                if CASE_RE.fullmatch(row.get("Case Number", "")):  # .get: a merged header can rename it
                     row.update(source_pdf=source, extraction_method="table", page=page_no)
                     rows.append(row)
                     last_row_by_width[len(cells)] = row
@@ -206,8 +176,6 @@ def read_tables(pdf, source):
     return rows
 
 
-# 3. Write the CSVs
-
 def write_csv(rows, path):
     # keep the PDF's own columns, in the order they first appear
     columns = ["source_pdf", "extraction_method", "page"]
@@ -217,17 +185,10 @@ def write_csv(rows, path):
                 columns.append(col)
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", newline="", encoding="utf-8") as f:
+    with path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=columns, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
-
-
-def parse_pdf(pdf_path, source):
-    """Returns the table rows and the first page's text."""
-    with pdfplumber.open(pdf_path) as pdf:
-        first_page = " ".join((pdf.pages[0].extract_text() or "").split())
-        return read_tables(pdf, source), first_page
 
 
 def convert_all():
@@ -249,13 +210,17 @@ def convert_all():
         if not REDO_CSVS and (csv_path.exists() or source in already_skipped):
             continue
 
-        rows, first_page = parse_pdf(pdf_path, source)
+        with pdfplumber.open(pdf_path) as pdf:
+            first_page = " ".join((pdf.pages[0].extract_text() or "").split())
+            rows = read_tables(pdf, source)
 
         if not rows:
             # either the report really has no elections (Oct 2025), or the PDF
             # is just pictures of a table with no text (most of 2023, Apr 2019)
-            why = ("report has no elections" if "produced no results" in first_page
-                   else "no readable text in the PDF")
+            if "produced no results" in first_page:
+                why = "report has no elections"
+            else:
+                why = "no readable text in the PDF"
             skipped.append(f"{source}: {why}")
             print(f"  {source}: skipped ({why})")
             continue
@@ -268,8 +233,6 @@ def convert_all():
         SKIPPED_FILE.write_text("\n".join(skipped) + "\n", encoding="utf-8")
         print(f"\n{len(skipped)} PDFs skipped, see {SKIPPED_FILE}")
 
-
-# 4. Main
 
 if __name__ == "__main__":
     if DOWNLOAD:
