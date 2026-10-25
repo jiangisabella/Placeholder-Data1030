@@ -52,5 +52,22 @@ Run these from the main repo folder, in order:
 - `report/` midterm report PDF and final presentation slides
 - `src/` all code
 
+## AI use
+We used Claude (Anthropic) as a reference while writing parts of the code. We planned
+each step ourselves and asked for feedback on the plan and for small examples of
+specific steps. Each file that used it has a citation block at the top, and the
+sections that used it are marked `Reference: (Anthropic, 2026)`
+
+- `src/docket_scraping.py` and `src/pdfs_to_csv.py` (scrapers): collecting and checking
+  case numbers, parsing the participants table and the docket's AJAX response, making
+  the scraper resumable, finding the report PDF links, and reading pdfplumber tables
+  that continue across page breaks.
+  Anthropic. (2026). *Claude* [Large language model]. https://claude.ai/share/bec36dfd-47c2-4ac1-887e-329860fa5cac
+- `src/preprocessmanual.py` (cleaning and merging): feedback on the order of the
+  cleaning steps and on leakage, and pandas help with deduplication, docket dates,
+  sanity checks, census regions, parent unions, employer names, participant features,
+  and the petition date.
+  Anthropic. (2026). *Claude* [Large language model]. https://claude.ai/share/e3a3320e-15c4-4346-b9f7-b104c5ce86f3
+
 ## License
 MIT, see `LICENSE`.

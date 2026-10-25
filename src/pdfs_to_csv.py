@@ -5,6 +5,23 @@ it's safe to stop and rerun. Reports with no tables (image-only PDFs) or no
 elections are listed in data/skipped_pdfs.txt.
 """
 
+"""
+AI use: Claude (Anthropic) was used as a reference while writing this file
+and src/docket_scraping.py. We planned the approach ourselves and asked for
+feedback and small examples along the way. Here it helped with:
+- collecting the FY pages and PDF links with BeautifulSoup and urljoin
+  (find_links, download_all)
+- how pdfplumber's extract_tables() returns rows, and flattening wrapped
+  cell text (clean_cell)
+- handling tables that continue across page breaks (add_leftover, read_tables)
+- keeping each PDF's own columns plus source_pdf/page, and logging PDFs
+  with no tables (write_csv, skipped_pdfs.txt)
+Sections that used it are marked "Reference: (Anthropic, 2026)".
+
+Anthropic. (2026). Claude [Large language model].
+    https://claude.ai/share/bec36dfd-47c2-4ac1-887e-329860fa5cac
+"""
+
 import csv
 import re
 import time
@@ -36,6 +53,11 @@ def get_page(session, url):
     return response
 
 
+"""
+Reference: (Anthropic, 2026). Collecting the year pages from the index's own
+links (their URLs don't follow one pattern), urljoin for relative links,
+and skipping the yearly total/summary files.
+"""
 def find_links(session, url):
     # every link on the page as a full url, in page order, no repeats
     soup = BeautifulSoup(get_page(session, url).text, "html.parser")
@@ -101,6 +123,13 @@ def download_all():
                 print(f"  got {fy}/{name}")
 
 
+"""
+Reference: (Anthropic, 2026). How extract_tables() returns cells (None when
+empty, newlines when text wraps), and the rules for page breaks: a row with
+a case number starts a new record, a row without one is the rest of the
+previous record, and a split header is merged column by column.
+Used for clean_cell, add_leftover, read_tables.
+"""
 def clean_cell(cell):
     # text that wraps inside a cell comes back with newlines, flatten it
     return " ".join(cell.split()) if cell else ""
@@ -176,6 +205,10 @@ def read_tables(pdf, source):
     return rows
 
 
+"""
+Reference: (Anthropic, 2026). One CSV per PDF with that PDF's own columns,
+plus source_pdf and page so each row can be traced back to its file.
+"""
 def write_csv(rows, path):
     # keep the PDF's own columns, in the order they first appear
     columns = ["source_pdf", "extraction_method", "page"]

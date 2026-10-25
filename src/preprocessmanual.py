@@ -14,6 +14,24 @@ features) run on the merged table.
 
 """
 
+"""
+AI use: Claude (Anthropic) was used as a reference while writing this file.
+We wrote the cleaning plan ourselves and asked for feedback on its order
+(e.g. which columns leak the outcome), then asked about specific pandas
+steps along the way:
+- looping over the FY folders, clean_text, to_numeric/to_datetime
+- n_unions with groupby().transform, and dropping repeated report rows
+- the docket: stripping "*", certifications, first tally date
+- sanity checks on eligible voters and election dates
+- the census region dictionary, parent union patterns, employer name regex
+- splitting participant text into lines and per-case lawyer/firm features
+- the petition date regex and filling it from file_date
+Sections that used it are marked "Reference: (Anthropic, 2026)".
+
+Anthropic. (2026). Claude [Large language model].
+    https://claude.ai/share/e3a3320e-15c4-4346-b9f7-b104c5ce86f3
+"""
+
 # %%
 from pathlib import Path
 
@@ -92,6 +110,10 @@ DATE_COLS = ["file_date", "election_date", "closed_date"]
 
 
 
+"""
+Reference: (Anthropic, 2026). Looping over the FY folders with glob, reading
+as str, clean_text on a whole Series, and errors="coerce" for numbers/dates.
+"""
 #Loading one year
 def clean_text(s):
     #nans
@@ -177,6 +199,8 @@ VOTE_KEY = ["case_number", "election_date", "eligible", "votes_for", "votes_agai
 Since we want single unions only, will count for the numbner of unions
 n_unions = how many unions were on the ballot (1-3)
 this goes by case + date, primary key
+Reference: (Anthropic, 2026). groupby().transform("max") to copy n_unions
+onto every row of the election.
 """
 df["n_unions"] = (df[["union_name", "union_name_2", "union_name_3"]] != "").sum(axis=1)
 df["n_unions"] = df.groupby(["case_number", "election_date"], dropna=False)["n_unions"].transform("max")
@@ -196,6 +220,8 @@ Repeats occur because of overlapping months.
 
 For cases that are reopened/closed, keeping the latest final legal outcome.
 Or the copy that has the closed reason/outcome specified.
+Reference: (Anthropic, 2026). Sorting on has_reason and closed_date so
+duplicated(keep="last") keeps the closed, latest copy.
 """
 df["has_reason"] = (df["closed_reason"] != "")
 df = df.sort_values(["has_reason", "closed_date"], na_position="first")
@@ -234,6 +260,7 @@ Cleaning:
 
 Needed to cover missing data. It has the certification, and date of first tally.
 Further down it also gives the petition date.
+Reference: (Anthropic, 2026). .str.rstrip("*") for the document names.
 """
 
 docket = pd.read_csv(DOCKET_CSV, dtype=str)
@@ -250,6 +277,8 @@ docket_cert:
 1 = Representative,
 0 = Results,
 -1 = neither or both
+Reference: (Anthropic, 2026). Sets of case numbers for each certification,
+and groupby().min() on a datetime column for the first tally.
 """
 doc = docket["document"].fillna("")
 
@@ -348,6 +377,9 @@ df = df.drop(columns=["reported_win", "reported_loss", "reported_result", "n_uni
 # %%
 """
 Sanity checks for votes
+Reference: (Anthropic, 2026). Feedback on these checks (a tie is a loss,
+eligible 0 or below the vote count -> missing) and filling bad election
+dates from the docket tally with .map(first_tally).
 """
 
 # sanity check against the vote counts (tie = loss)
@@ -409,6 +441,9 @@ Adding new features
 - census_region: state is mapped to regions
 - parent_union: union name is matched to its parent
 - employer : case_name  cleaned
+Reference: (Anthropic, 2026). The CENSUS_REGIONS dictionary, the starting
+PARENT_UNION keyword list, and the employer name regex (ALIAS_SPLIT,
+SUFFIXES). We edited these afterwards.
 """
 
 CENSUS_REGIONS = {
@@ -538,6 +573,8 @@ Making (one row per case, then merged onto the elections):
   separated by "; " (split it back into a list with .str.split("; "))
 - has_intervenor: 1 if another party (e.g. a second union) joined the case
 
+Reference: (Anthropic, 2026). Splitting the raw text into lines with .str,
+and grouping by case for the counts and the joined firm list (list_firms).
 """
 
 participants = pd.read_csv(PARTICIPANTS_CSV, dtype=str).drop_duplicates()
@@ -594,6 +631,8 @@ Steps:
 - if the docket has no petition, use the report's own file date instead
 - days_petition_to_election: how many days from the petition to the vote
   (a petition after the vote is a bad date, set to missing)
+Reference: (Anthropic, 2026). The signed petition regex and
+fillna(df["file_date"]) to fill from another column.
 """
 
 # petition date = earliest signed petition (amended or not)

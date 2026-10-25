@@ -1,3 +1,17 @@
+"""
+AI use: Claude (Anthropic) was used as a reference while writing this file
+and src/pdfs_to_csv.py. We planned the approach ourselves and asked for
+feedback and small examples along the way. Here it helped with:
+- checking case numbers with a regex and fullmatch (load_case_numbers)
+- finding the Participants table by its header (scrape_participants)
+- reading the docket table out of the Drupal AJAX response (scrape_docket)
+- making the batch run resumable with status files (completed_cases,
+  check_unfinished_rows, batch_scrape)
+Sections that used it are marked "Reference: (Anthropic, 2026)".
+
+Anthropic. (2026). Claude [Large language model].
+    https://claude.ai/share/bec36dfd-47c2-4ac1-887e-329860fa5cac
+"""
 
 import csv
 import re
@@ -27,6 +41,10 @@ DOCKET_URL = (
 )
 
 
+"""
+Reference: (Anthropic, 2026). Removing spaces/en-dashes before matching,
+and using fullmatch so the whole case number has to fit the pattern.
+"""
 def load_case_numbers(folder):
     csv_files = sorted(folder.glob("FY*/*.csv"))
     print(f"Found {len(csv_files)} CSV files")
@@ -49,6 +67,10 @@ def load_case_numbers(folder):
     return sorted(cases)
 
 
+"""
+Reference: (Anthropic, 2026). Finding the Participants table by its first
+header and keeping the cell's lines with get_text("\\n", strip=True).
+"""
 def scrape_participants(session, case_number):
     url = f"https://www.nlrb.gov/case/{case_number}"
     response = session.get(url, timeout=30)
@@ -83,6 +105,12 @@ def scrape_participants(session, case_number):
     raise ValueError(f"{case_number}: Participants table not found")
 
 
+"""
+Reference: (Anthropic, 2026). Picking the "insert" command out of the Drupal
+AJAX JSON, parsing its HTML with BeautifulSoup, and checking that
+items_per_page is set to All. We found the AJAX URL ourselves in the
+browser's Network tab.
+"""
 def scrape_docket(session, case_number):
     response = session.get(
         DOCKET_URL.format(case_number),
@@ -142,6 +170,12 @@ def scrape_docket(session, case_number):
     return records
 
 
+"""
+Reference: (Anthropic, 2026). Resuming from status files: write the data
+before the "ok" status, record failures too, and check for rows left
+without a status so an interrupted run doesn't duplicate them.
+Used for completed_cases, append_rows, check_unfinished_rows, batch_scrape.
+"""
 def completed_cases(path):
     done = set()
 
