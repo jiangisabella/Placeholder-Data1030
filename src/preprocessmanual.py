@@ -21,8 +21,8 @@ import numpy as np
 import pandas as pd
 
 CSV_DIR = Path("data/raw_csvs")
-PARTICIPANTS_CSV = Path("data/case_participants_raw.csv")   # from src/docket_scraping.py
-DOCKET_CSV = Path("data/docket_activity_merged.csv")   # from src/docket_scraping.py, full dockets
+PARTICIPANTS_CSV = Path("data/raw_csvs/scraper_csvs/case_participants_raw.csv")   # from src/docket_scraping.py
+DOCKET_CSV = Path("data/raw_csvs/scraper_csvs/docket_activity.csv")   # from src/docket_scraping.py, full dockets
 OUT_CSV = Path("data/elections_clean.csv")
 
 """
